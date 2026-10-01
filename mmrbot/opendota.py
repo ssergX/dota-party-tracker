@@ -15,7 +15,21 @@ BASE_URL = "https://api.opendota.com/api"
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
+_MAX_RETRY_AFTER = 30.0
+
+
+def _retry_after(resp, default: float) -> float:
+    """Пауза из заголовка Retry-After (секунды), ограниченная сверху; иначе default."""
+    try:
+        value = float((getattr(resp, "headers", None) or {}).get("Retry-After"))
+    except (TypeError, ValueError):
+        return default
+    return min(max(value, 0.0), _MAX_RETRY_AFTER)
+
+
 class OpenDota:
+    HISTORY_PAGE = 1000  # размер страницы при полной загрузке истории
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -52,18 +66,21 @@ class OpenDota:
             last_exc: Optional[Exception] = None
             for attempt in range(self.max_retries):
                 self._throttle()
+                delay = 1.5 * (attempt + 1)
                 try:
                     resp = self._session.get(url, params=params, timeout=self.timeout)
-                except requests.RequestException as exc:  # сетевые сбои
+                    if resp.status_code in _RETRY_STATUSES:
+                        last_exc = RuntimeError(f"OpenDota HTTP {resp.status_code}")
+                        delay = _retry_after(resp, delay)
+                    else:
+                        resp.raise_for_status()  # 4xx — не ретраим, сразу наверх
+                        return resp.json()
+                except requests.HTTPError:
+                    raise
+                except (requests.RequestException, ValueError) as exc:  # сеть / битый JSON
                     last_exc = exc
-                    time.sleep(1.5 * (attempt + 1))
-                    continue
-                if resp.status_code in _RETRY_STATUSES:
-                    last_exc = RuntimeError(f"OpenDota HTTP {resp.status_code}")
-                    time.sleep(1.5 * (attempt + 1))
-                    continue
-                resp.raise_for_status()
-                return resp.json()
+                if attempt < self.max_retries - 1:  # после последней попытки не спим зря
+                    time.sleep(delay)
             raise last_exc or RuntimeError("OpenDota: не удалось получить ответ")
 
     def refresh(self, account_id: int) -> bool:
@@ -82,16 +99,41 @@ class OpenDota:
 
     def get_profile(self, account_id: int) -> dict:
         data = self._get(f"/players/{account_id}") or {}
+        profile = data.get("profile") or {}
         return {
             "rank_tier": data.get("rank_tier"),
             "leaderboard_rank": data.get("leaderboard_rank"),
-            "personaname": (data.get("profile") or {}).get("personaname"),
+            "personaname": profile.get("personaname"),
+            "avatarfull": profile.get("avatarfull"),
+            "profileurl": profile.get("profileurl"),
+            "steamid": profile.get("steamid"),
+            "loccountrycode": profile.get("loccountrycode"),
+            "plus": bool(profile.get("plus")),
+            "last_login": profile.get("last_login"),
         }
 
-    def get_matches(self, account_id: int, limit: int = 200) -> list[dict]:
-        # significant=0 включает все типы лобби; ранкед-фильтр делаем сами по lobby_type.
-        data = self._get(f"/players/{account_id}/matches", params={"limit": limit, "significant": 0})
-        return data if isinstance(data, list) else []
+    def get_matches(self, account_id: int, limit: Optional[int] = 200, lobby_type: Optional[int] = 7) -> list[dict]:
+        """Матчи игрока. По умолчанию только ранкед (lobby_type=7) — фильтр на стороне OpenDota,
+        иначе лимит забивается обычными играми. limit=None — вся история."""
+        base: dict = {"significant": 0}
+        if lobby_type is not None:
+            base["lobby_type"] = lobby_type
+        path = f"/players/{account_id}/matches"
+        if limit is not None:
+            data = self._get(path, params=dict(base, limit=limit))
+            return data if isinstance(data, list) else []
+        # Вся история — постранично: один огромный ответ OpenDota иногда рвёт (HTTP 500).
+        result: list[dict] = []
+        offset = 0
+        while True:
+            page = self._get(path, params=dict(base, limit=self.HISTORY_PAGE, offset=offset))
+            if not isinstance(page, list):
+                break
+            result.extend(page)
+            if len(page) < self.HISTORY_PAGE:
+                break
+            offset += self.HISTORY_PAGE
+        return result
 
     def get_lanes(self, account_id: int) -> dict:
         """Игры/победы по линиям из /players/{id}/counts → {lane_int: (games, wins)}.

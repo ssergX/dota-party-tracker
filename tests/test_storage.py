@@ -241,3 +241,85 @@ def test_update_player_insights(store):
     assert got.last_lanes == '{"2": [10, 6]}'
     assert got.last_gpm_median == 520
     assert got.last_gpm_best == 800
+
+
+def test_update_match_stratz_sets_fields_and_keeps_existing_numbers(tmp_path):
+    from mmrbot.storage import Storage
+    store = Storage(str(tmp_path / "s.db"))
+    player = store.add_player(1, 42, "Вася", None, 0, 0)
+    store.add_matches(player.id, [
+        {"match_id": 10, "start_time": 5, "player_slot": 0, "radiant_win": True, "lobby_type": 7},
+    ])
+    store.update_match_details(player.id, 10, {"gpm": 500}, None)
+    store.update_match_stratz(player.id, 10, {
+        "position": 2, "role": "CORE", "lane": "MID_LANE", "imp": 9,
+        "gpm": 999, "xpm": 700, "net_worth": 20000,
+    })
+    row = store.get_matches(player.id)[0]
+    assert (row["position"], row["role"], row["lane"], row["imp"]) == (2, "CORE", "MID_LANE", 9)
+    assert row["gpm"] == 500  # уже заполненное из OpenDota не затираем
+    assert row["xpm"] == 700 and row["net_worth"] == 20000  # пустое дозаполняем
+
+
+def test_matches_without_stratz_listed(tmp_path):
+    from mmrbot.storage import Storage
+    store = Storage(str(tmp_path / "s.db"))
+    player = store.add_player(1, 42, "Вася", None, 0, 0)
+    store.add_matches(player.id, [
+        {"match_id": 10, "start_time": 5, "player_slot": 0, "radiant_win": True, "lobby_type": 7},
+        {"match_id": 11, "start_time": 6, "player_slot": 0, "radiant_win": True, "lobby_type": 7},
+    ])
+    store.update_match_stratz(player.id, 10, {"position": 1, "role": "CORE", "lane": "SAFE_LANE", "imp": 1, "party_size": 1})
+    assert store.get_match_ids_without_stratz(player.id, 0) == [11]
+
+
+def test_stratz_miss_counter_limits_pending(tmp_path):
+    from mmrbot.storage import Storage
+    store = Storage(str(tmp_path / "s.db"))
+    player = store.add_player(1, 42, "Вася", None, 0, 0)
+    store.add_matches(player.id, [
+        {"match_id": 10, "start_time": 5, "player_slot": 0, "radiant_win": True, "lobby_type": 7},
+    ])
+    for _ in range(3):
+        store.mark_stratz_miss(player.id, [10])
+    assert store.get_match_ids_without_stratz(player.id, 0, max_tries=5) == [10]
+    assert store.get_match_ids_without_stratz(player.id, 0, max_tries=3) == []
+
+
+def test_stratz_fills_missing_party_size_but_keeps_opendota_value(tmp_path):
+    from mmrbot.storage import Storage
+    store = Storage(str(tmp_path / "s.db"))
+    player = store.add_player(1, 42, "Вася", None, 0, 0)
+    base = {"player_slot": 0, "radiant_win": True, "lobby_type": 7}
+    store.add_matches(player.id, [
+        dict(base, match_id=10, start_time=5),                  # размера пати нет
+        dict(base, match_id=11, start_time=6, party_size=2),    # из OpenDota
+    ])
+    for mid in (10, 11):
+        store.update_match_stratz(player.id, mid, {"position": 1, "party_size": 3})
+    sizes = {m["match_id"]: m["party_size"] for m in store.get_matches(player.id)}
+    assert sizes == {10: 3, 11: 2}
+
+
+def test_stratz_done_matches_without_party_size_are_requeued(tmp_path):
+    from mmrbot.storage import Storage
+    store = Storage(str(tmp_path / "s.db"))
+    player = store.add_player(1, 42, "Вася", None, 0, 0)
+    store.add_matches(player.id, [{"match_id": 10, "start_time": 5, "player_slot": 0,
+                                   "radiant_win": True, "lobby_type": 7}])
+    store.update_match_stratz(player.id, 10, {"position": 1})          # старый разбор: позиция есть, пати нет
+    assert store.get_match_ids_without_stratz(player.id, 0) == [10]
+    store.update_match_stratz(player.id, 10, {"position": 1, "party_size": 1})
+    assert store.get_match_ids_without_stratz(player.id, 0) == []
+
+
+def test_connection_uses_wal_and_busy_timeout(tmp_path):
+    from mmrbot.storage import Storage
+
+    store = Storage(str(tmp_path / "w.db"))
+    conn = store._conn()
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 10_000
+    finally:
+        conn.close()

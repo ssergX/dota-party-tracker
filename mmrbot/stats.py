@@ -280,3 +280,86 @@ def duration_stats(matches: list[dict]) -> dict[str, float]:
         "avg_minutes": sum(durations) / len(durations) / 60,
         "max_minutes": max(durations) / 60,
     }
+
+
+PERIOD_SECONDS = {"day": 86_400, "week": 7 * 86_400, "month": 30 * 86_400, "year": 365 * 86_400}
+
+
+def period_since(period: str, now: int) -> Optional[int]:
+    """'day'|'week'|'month'|'year' → граница start_time; 'all' → None (без ограничения)."""
+    seconds = PERIOD_SECONDS.get(period)
+    return None if seconds is None else now - seconds
+
+
+def local_day_start(now: int, tz_name: str) -> int:
+    """Unix-время начала текущих календарных суток (00:00) в часовом поясе чата."""
+    try:
+        tz = pytz.timezone(tz_name)
+    except Exception:
+        tz = pytz.timezone("Europe/Moscow")
+    local = datetime.fromtimestamp(now, tz=timezone.utc).astimezone(tz)
+    midnight = tz.localize(datetime(local.year, local.month, local.day))
+    return int(midnight.timestamp())
+
+
+def mmr_series(matches: list[dict], step: int) -> list[tuple[int, int]]:
+    """Накопленное изменение MMR после каждой игры: [(время, ±MMR)] (победа +step, поражение −step)."""
+    total = 0
+    points = []
+    for match in sorted(matches, key=lambda m: m["start_time"]):
+        total += step if is_win(match["player_slot"], match["radiant_win"]) else -step
+        points.append((match["start_time"], total))
+    return points
+
+
+def _mean(values: list) -> Optional[float]:
+    values = [v for v in values if v is not None]
+    return sum(values) / len(values) if values else None
+
+
+def _group_stats(group: list[dict]) -> dict:
+    games = len(group)
+    wins = sum(1 for m in group if is_win(m["player_slot"], m["radiant_win"]))
+    kills = sum(m.get("kills") or 0 for m in group)
+    deaths = sum(m.get("deaths") or 0 for m in group)
+    assists = sum(m.get("assists") or 0 for m in group)
+    return {
+        "games": games,
+        "wins": wins,
+        "losses": games - wins,
+        "winrate": wins / games,
+        "kda": (kills + assists) / max(deaths, 1),
+        "avg_imp": _mean([m.get("imp") for m in group]),
+        "avg_gpm": _mean([m.get("gpm") for m in group]),
+    }
+
+
+def hero_stats(
+    matches: list[dict],
+    since_ts: Optional[int] = None,
+    limit: Optional[int] = None,
+    hero_id: Optional[int] = None,
+) -> list[dict]:
+    """Статистика по героям (игры, винрейт, KDA, средний IMP/GPM), по убыванию числа игр."""
+    by_hero: dict[int, list[dict]] = {}
+    for m in matches:
+        hid = m.get("hero_id")
+        if not hid or (hero_id is not None and hid != hero_id):
+            continue
+        if since_ts is not None and m["start_time"] < since_ts:
+            continue
+        by_hero.setdefault(hid, []).append(m)
+    result = [{"hero_id": hid, **_group_stats(group)} for hid, group in by_hero.items()]
+    result.sort(key=lambda h: (h["games"], h["winrate"], -h["hero_id"]), reverse=True)
+    return result[:limit] if limit else result
+
+
+def role_stats(matches: list[dict], since_ts: Optional[int] = None) -> list[dict]:
+    """Статистика по позициям 1–5 (только матчи с данными Stratz), по возрастанию позиции."""
+    by_pos: dict[int, list[dict]] = {}
+    for m in matches:
+        pos = m.get("position")
+        if not pos or (since_ts is not None and m["start_time"] < since_ts):
+            continue
+        by_pos.setdefault(pos, []).append(m)
+    return [{"position": pos, **_group_stats(by_pos[pos])} for pos in sorted(by_pos)]

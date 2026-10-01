@@ -132,6 +132,24 @@ HERO_NAMES: dict[int, str] = {
 }
 
 
+_ALIASES = {"am": 1, "cm": 5, "sf": 11, "pa": 44, "bb": 99, "wk": 42, "tb": 109, "ember": 106, "ls": 54}
+
+
+def find_hero(query: str):
+    """Имя героя (регистр не важен; префикс/подстрока и короткие алиасы) → hero_id | None."""
+    q = (query or "").strip().lower()
+    if not q:
+        return None
+    if q in _ALIASES:
+        return _ALIASES[q]
+    names = {hid: name.lower() for hid, name in HERO_NAMES.items()}
+    for match in (lambda n: n == q, lambda n: n.startswith(q), lambda n: q in n):
+        for hid, name in names.items():
+            if match(name):
+                return hid
+    return None
+
+
 def hero_name(hero_id) -> str:
     if not hero_id:
         return "?"

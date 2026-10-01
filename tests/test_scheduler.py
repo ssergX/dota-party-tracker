@@ -1,7 +1,12 @@
+import asyncio
 from datetime import datetime, timezone
 
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.methods import SendMessage
+
+from mmrbot import scheduler as sched
 from mmrbot.scheduler import due_local_date
-from mmrbot.storage import Chat
+from mmrbot.storage import Chat, Storage
 
 
 def chat(digest_hour=10, tz="Europe/Moscow", last=None):
@@ -46,3 +51,42 @@ def test_respects_chat_timezone():
 def test_bad_timezone_falls_back_to_moscow():
     c = chat(digest_hour=10, tz="Not/AZone")
     assert due_local_date(c, utc(2026, 9, 29, 7)) == "2026-09-29"
+
+
+# --- send_digest: устойчивость к потере доступа к чату -----------------------
+
+
+class _FailingBot:
+    def __init__(self, exc):
+        self.exc = exc
+        self.sent = 0
+
+    async def send_message(self, *a, **kw):
+        self.sent += 1
+        raise self.exc
+
+
+def _run_digest(tmp_path, monkeypatch, exc):
+    async def fake_board(*a, **kw):
+        return "доска"
+
+    monkeypatch.setattr(sched, "render_board", fake_board)
+    storage = Storage(str(tmp_path / "t.db"))
+    c = storage.get_or_create_chat(5)
+    bot = _FailingBot(exc)
+    asyncio.run(sched.send_digest(bot, storage, None, c, "2026-09-29"))
+    return storage.get_or_create_chat(5).last_digest_date
+
+
+def test_digest_forbidden_marks_day_done(tmp_path, monkeypatch):
+    exc = TelegramForbiddenError(method=SendMessage(chat_id=5, text="x"), message="bot was kicked")
+    assert _run_digest(tmp_path, monkeypatch, exc) == "2026-09-29"
+
+
+def test_digest_chat_not_found_marks_day_done(tmp_path, monkeypatch):
+    exc = TelegramBadRequest(method=SendMessage(chat_id=5, text="x"), message="chat not found")
+    assert _run_digest(tmp_path, monkeypatch, exc) == "2026-09-29"
+
+
+def test_digest_other_error_is_retried_next_hour(tmp_path, monkeypatch):
+    assert _run_digest(tmp_path, monkeypatch, RuntimeError("boom")) is None

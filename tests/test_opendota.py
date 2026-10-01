@@ -178,3 +178,90 @@ def test_concurrent_calls_are_serialized_by_lock():
     for t in threads:
         t.join()
     assert probe.max_active == 1  # запросы не пересекались
+
+
+class PagedSession(FakeSession):
+    """Отдаёт матчи страницами по offset/limit, как OpenDota."""
+
+    def __init__(self, total):
+        super().__init__([])
+        self.total = total
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append({"url": url, "params": params or {}})
+        offset = (params or {}).get("offset", 0)
+        limit = (params or {}).get("limit", self.total)
+        return FakeResp([{"match_id": i} for i in range(offset, min(offset + limit, self.total))])
+
+
+def test_get_matches_ranked_filter_and_limit():
+    session = FakeSession([])
+    od = OpenDota(session=session, min_interval=0)
+    od.get_matches(42)
+    assert session.calls[0]["params"] == {"significant": 0, "limit": 200, "lobby_type": 7}
+
+
+def test_get_matches_full_history_is_paged():
+    session = PagedSession(2500)
+    od = OpenDota(session=session, min_interval=0)
+    od.HISTORY_PAGE = 1000
+    result = od.get_matches(42, limit=None)
+    assert len(result) == 2500 and result[0]["match_id"] == 0 and result[-1]["match_id"] == 2499
+    assert [c["params"]["offset"] for c in session.calls] == [0, 1000, 2000]
+    assert all(c["params"]["lobby_type"] == 7 for c in session.calls)
+
+
+class SeqSession(FakeSession):
+    """Отдаёт ответы по очереди (для проверки ретраев)."""
+
+    def __init__(self, responses):
+        super().__init__(None)
+        self.responses = list(responses)
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append({"url": url, "params": params or {}})
+        return self.responses.pop(0)
+
+
+class RespWithHeaders(FakeResp):
+    def __init__(self, payload, status_code=200, headers=None):
+        super().__init__(payload, status_code)
+        self.headers = headers or {}
+
+
+class BadJsonResp(FakeResp):
+    def json(self):
+        raise ValueError("not json")
+
+
+def _no_sleep(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("mmrbot.opendota.time.sleep", lambda s: sleeps.append(s))
+    return sleeps
+
+
+def test_retry_honors_retry_after_header(monkeypatch):
+    sleeps = _no_sleep(monkeypatch)
+    session = SeqSession([RespWithHeaders({}, 429, {"Retry-After": "7"}), FakeResp({"rank_tier": 5})])
+    od = OpenDota(session=session, min_interval=0)
+    assert od.get_profile(1)["rank_tier"] == 5
+    assert sleeps == [7.0]
+
+
+def test_no_sleep_after_last_failed_attempt(monkeypatch):
+    sleeps = _no_sleep(monkeypatch)
+    session = SeqSession([FakeResp({}, 503)] * 3)
+    od = OpenDota(session=session, min_interval=0, max_retries=3)
+    try:
+        od.get_profile(1)
+        assert False, "ожидали исключение"
+    except RuntimeError:
+        pass
+    assert len(sleeps) == 2  # между попытками, но не после последней
+
+
+def test_invalid_json_is_retried(monkeypatch):
+    _no_sleep(monkeypatch)
+    session = SeqSession([BadJsonResp({}), FakeResp({"rank_tier": 9})])
+    od = OpenDota(session=session, min_interval=0)
+    assert od.get_profile(1)["rank_tier"] == 9

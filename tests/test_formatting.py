@@ -86,7 +86,7 @@ def test_plural_games():
 
 def test_zero_games_collapsed_no_noise():
     text = render_leaderboard([summary(games_total=0, wins_total=0, losses_total=0, winrate=0.0, kda_ratio=0.0)])
-    assert "пока без игр" in text
+    assert "игры отсутствуют" in text
     assert "KDA 0.00" not in text
     assert "0–0" not in text
 
@@ -124,7 +124,7 @@ def test_today_view_marks_no_games():
     text = render_leaderboard([summary(games_today=0, wins_today=0, losses_today=0, delta_today=0)], today_only=True)
     assert "Вася" in text
     # без игр сегодня — не показываем ложную дельту, а пишем про отсутствие игр
-    assert "без игр" in text.lower()
+    assert "игр не было" in text.lower()
 
 
 def test_player_without_anchor_mmr_shows_question_not_crash():
@@ -203,7 +203,7 @@ def test_render_player_card_is_windowed_only():
     assert "520" in text            # windowed GPM
     assert "Juggernaut" in text     # hero_id 8
     assert "соло" in text.lower()
-    assert "Последние" in text      # явная пометка окна
+    assert "последние" in text      # явная пометка окна
     # карьерных строк быть не должно
     assert "Mid" not in text
     assert "без линии" not in text
@@ -218,7 +218,7 @@ def test_render_player_card_windowed_records():
         longest_win_streak=3,
     )
     text = render_player_card(s)
-    assert "✅" in text                         # форма
+    assert "В" in text                        # форма
     assert "10/1/10" in text                    # лучшая игра
     assert "3" in text                          # макс серия
 
@@ -250,11 +250,11 @@ def test_render_player_card_shows_skill_breakdown_and_role():
         skill={"gold_per_min": 0.45, "hero_damage_per_min": 0.78, "kills_per_min": 0.66, "hero_healing_per_min": 0.9},
     )
     text = render_player_card(s)
-    assert "Скилл" in text
+    assert "Профиль навыков" in text
     assert "Фарм" in text            # категория
     assert "78%" in text             # урон-перцентиль
     assert ("▰" in text) or ("▱" in text)  # бар
-    assert "стиль" in text.lower() and "кор" in text.lower()
+    assert "игровая роль" in text.lower() and "кор" in text.lower()
 
 
 def test_render_player_card_with_standing_block():
@@ -275,7 +275,7 @@ def _two_player_comparison():
 def test_render_compare_table_orders_by_power():
     comp, summaries = _two_player_comparison()
     text = render_compare_table(comp, summaries)
-    assert "Сила в чате" in text
+    assert "Сравнение игроков" in text
     assert text.index("A") < text.index("B")   # A первым (сильнее)
     assert "🥇" in text and "🥈" in text
 
@@ -291,3 +291,141 @@ def test_standing_line_none_when_alone():
     a = summary(display_name="Solo", avg_perf=0.5)
     comp = build_chat_comparison([a])
     assert standing_line(comp, "Solo") is None  # сравнивать не с кем
+
+
+def test_find_hero_by_name_and_alias():
+    from mmrbot.heroes import find_hero
+    assert find_hero("axe") == 2
+    assert find_hero("Anti") == 1
+    assert find_hero("  necro ") == 36
+    assert find_hero("несуществующий") is None
+
+
+def test_render_player_heroes_and_roles():
+    from mmrbot.formatting import render_player_heroes, render_roles
+    rows = [{"hero_id": 2, "games": 4, "wins": 3, "losses": 1, "winrate": 0.75, "kda": 3.5,
+             "avg_imp": 6.4, "avg_gpm": 500.0}]
+    text = render_player_heroes("Вася <b>", "month", rows)
+    assert "Вася &lt;b&gt;" in text and "Axe" in text and "75%" in text and "+6" in text
+    assert "месяц" in text
+    assert "игр нет" in render_player_heroes("Вася", "day", []).lower()
+    roles = render_roles("Вася", [{"position": 1, "games": 5, "wins": 3, "losses": 2,
+                                   "winrate": 0.6, "kda": 2.0, "avg_imp": None, "avg_gpm": None}])
+    assert "Pos 1" in roles or "Керри" in roles
+
+
+def test_render_match_card_and_hero_detail():
+    from mmrbot.formatting import render_hero_detail, render_match_card
+    from mmrbot.storage import Player
+    p = Player(1, 1, 1, "Вася", None, 0, 0, None, None, None)
+    row = {"match_id": 11, "start_time": 1_700_000_000, "hero_id": 2, "player_slot": 0, "radiant_win": True,
+           "kills": 10, "deaths": 2, "assists": 5, "duration": 2400, "gpm": 600, "xpm": 700,
+           "net_worth": 30000, "hero_damage": 25000, "tower_damage": 3000, "hero_healing": 0,
+           "last_hits": 300, "denies": 10, "level": 25, "position": 1, "role": "CORE",
+           "lane": "SAFE_LANE", "imp": 12}
+    text = render_match_card({"player": p, "match": row})
+    for needle in ("Вася", "Axe", "10/2/5", "Победа", "Pos 1", "+12", "11"):
+        assert needle in text
+    s = {"games": 3, "wins": 2, "losses": 1, "winrate": 2 / 3, "kda": 3.0, "avg_imp": 4.0, "avg_gpm": 500.0}
+    text = render_hero_detail(2, "all", [(p, s)])
+    assert "Axe" in text and "Вася" in text and "67%" in text
+    assert "не играли" in render_hero_detail(2, "all", []).lower()
+
+
+def _fp(acc, radiant, hero, pos, name, imp=5):
+    return {"account_id": acc, "name": name, "is_radiant": radiant, "hero_id": hero, "position": pos,
+            "role": "CORE", "lane": "SAFE_LANE", "kills": 3, "deaths": 1, "assists": 4, "imp": imp,
+            "gpm": 500, "xpm": 600, "net_worth": 20000, "hero_damage": 15000, "tower_damage": 1000,
+            "hero_healing": 0, "last_hits": 200, "denies": 5, "level": 22}
+
+
+def test_render_full_match_marks_tracked_and_shows_both_teams():
+    from mmrbot.formatting import render_full_match
+    match = {"match_id": 77, "start_time": 1_700_000_000, "duration": 2400, "radiant_win": False,
+             "players": [_fp(1, True, 2, 1, "Steam1"), _fp(2, False, 5, 5, None, imp=None),
+                         _fp(3, False, 1, 2, "Чужой")]}
+    text = render_full_match(match, {1: "Вася"}, focus=1)
+    assert "Матч 77" in text and "Победитель: Dire" in text
+    assert "★ <b>Вася</b>" in text          # свой игрок подсвечен и назван по имени из бота
+    assert "Radiant" in text and "Dire" in text
+    assert "Чужой" in text and "Crystal Maiden" in text and "IMP —" in text
+    assert "GPM 500" in text                  # подробная карточка фокус-игрока сверху
+    assert "Пати" not in text
+    no_focus = render_full_match(match, {}, focus=None)
+    assert "GPM" not in no_focus and "Матч 77" in no_focus
+
+
+def test_imp_formatting_has_no_negative_zero():
+    from mmrbot.formatting import _imp
+    assert _imp(-0.4) == "0" and _imp(0.2) == "0" and _imp(-9.3) == "-9" and _imp(4.6) == "+5"
+    assert _imp(None) == "—"
+
+
+def test_render_period_leaderboard():
+    from mmrbot.formatting import render_period_leaderboard
+
+    rows = [
+        {"name": "Аня", "games": 5, "wins": 4, "losses": 1, "delta": 75, "winrate": 0.8, "kda": 3.2},
+        {"name": "Боря", "games": 2, "wins": 0, "losses": 2, "delta": -50, "winrate": 0.0, "kda": 1.1},
+        {"name": "Ваня", "games": 0, "wins": 0, "losses": 0, "delta": 0, "winrate": 0.0, "kda": 0.0},
+    ]
+    text = render_period_leaderboard(rows, "week")
+    assert "за неделю" in text
+    assert "Аня" in text and "4–1" in text and "80%" in text
+    assert "📈" in text and "📉" in text
+    assert "игр не было" in text  # Ваня
+    assert render_period_leaderboard([], "week").startswith("В данном чате нет")
+
+
+def test_find_hero_alias_ls_is_lifestealer():
+    from mmrbot.heroes import find_hero, hero_name
+
+    assert hero_name(find_hero("ls")) == "Lifestealer"
+    assert hero_name(find_hero("axe")) == "Axe"
+
+
+def test_match_card_ignores_unknown_party_key():
+    from types import SimpleNamespace
+    from mmrbot.formatting import render_match_card
+
+    row = {"match_id": 1, "start_time": 1_700_000_000, "player_slot": 0, "radiant_win": True,
+           "hero_id": 1, "kills": 1, "deaths": 1, "assists": 1}
+    text = render_match_card({"player": SimpleNamespace(display_name="Вася"), "match": row, "party": [("x", row)]})
+    assert "Матч 1" in text
+
+
+def test_player_heroes_block_layout_with_emoji():
+    from mmrbot.formatting import render_player_heroes
+    rows = [{"hero_id": 1, "games": 987, "winrate": 0.53, "kda": 4.4, "avg_imp": -1, "avg_gpm": 624}]
+    text = render_player_heroes("Shinoame", "all", rows)
+    assert text.startswith("🦸 <b>Герои: Shinoame</b>")
+    assert "🥇" in text and "987и" in text
+    assert "🟡 53%" in text and "⚔️ KDA 4.4" in text and "📊 IMP -1" in text and "💰 GPM 624" in text
+
+
+def test_roles_block_has_position_emoji_and_wr_dot():
+    from mmrbot.formatting import render_roles
+    rows = [{"position": 5, "games": 482, "winrate": 0.58, "kda": 2.6, "avg_imp": 1, "avg_gpm": 369}]
+    text = render_roles("Shinoame", rows)
+    assert "💚 <b>Pos 5 · Фулл-саппорт</b>" in text
+    assert "🟢 58%" in text
+
+
+def test_player_roster_shows_current_mmr_and_extra_info():
+    from mmrbot.formatting import render_player_list
+    text = render_player_list([summary(streak_type="W", streak_len=3)])
+    assert "👥" in text and "Вася" in text
+    assert "≈ 5050 MMR" in text and "старт 5000" in text and "+50" in text
+    assert "4 игры" in text and "3–1" in text and "75%" in text
+    assert "3 подряд" in text and "id " in text
+
+
+def test_player_roster_without_mmr_or_games():
+    from mmrbot.formatting import render_player_list
+    text = render_player_list([summary(current_mmr=None, anchor_mmr=None, games_total=0, mmr_delta=0)])
+    assert "MMR не указан" in text and "игр пока нет" in text
+
+
+def test_player_roster_empty_gives_hint():
+    from mmrbot.formatting import render_player_list
+    assert "/add" in render_player_list([])

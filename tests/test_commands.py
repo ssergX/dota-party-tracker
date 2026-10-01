@@ -121,3 +121,23 @@ def test_hour_out_of_range_raises():
 def test_hour_negative_raises():
     with pytest.raises(ValueError):
         parse_hour("-1")
+
+
+def test_parse_target_period():
+    from mmrbot.commands import parse_target_period
+    assert parse_target_period("") == (None, "all")
+    assert parse_target_period("месяц") == (None, "month")
+    assert parse_target_period("@vasya") == ("vasya", "all")
+    assert parse_target_period("@Vasya неделя") == ("Vasya", "week")
+    assert parse_target_period("день Вася Пупкин") == ("Вася Пупкин", "day")
+    assert parse_target_period("week") == (None, "week")
+
+
+def test_parse_match_args():
+    from mmrbot.commands import parse_match_args
+    assert parse_match_args("") == (None, None)
+    assert parse_match_args("последний") == (None, None)
+    assert parse_match_args("8138048280") == (8138048280, None)
+    assert parse_match_args("@vasya") == (None, "vasya")
+    assert parse_match_args("8138048280 @vasya") == (8138048280, "vasya")
+    assert parse_match_args("Вася последний") == (None, "Вася")

@@ -334,3 +334,83 @@ def test_hero_pool_counts_distinct():
 
 def test_hero_pool_empty():
     assert hero_pool([]) == 0
+
+
+# --- hero_stats / role_stats -------------------------------------------
+
+def _m(match_id, start, hero, slot=0, rw=True, k=1, d=1, a=1, imp=None, position=None, gpm=None):
+    return {"match_id": match_id, "start_time": start, "hero_id": hero, "player_slot": slot,
+            "radiant_win": rw, "kills": k, "deaths": d, "assists": a, "imp": imp,
+            "position": position, "gpm": gpm}
+
+
+def test_hero_stats_aggregates_and_sorts():
+    from mmrbot.stats import hero_stats
+    ms = [
+        _m(1, 100, 1, k=10, d=2, a=4, imp=20, gpm=600),
+        _m(2, 200, 1, rw=False, k=2, d=6, a=2, imp=-10, gpm=400),
+        _m(3, 300, 2),
+    ]
+    res = hero_stats(ms)
+    assert [h["hero_id"] for h in res] == [1, 2]
+    top = res[0]
+    assert (top["games"], top["wins"]) == (2, 1)
+    assert top["winrate"] == 0.5
+    assert top["kda"] == (10 + 2 + 4 + 2) / (2 + 6)
+    assert top["avg_imp"] == 5
+    assert top["avg_gpm"] == 500
+    assert res[1]["avg_imp"] is None
+
+
+def test_hero_stats_since_filters_period():
+    from mmrbot.stats import hero_stats
+    ms = [_m(1, 100, 1), _m(2, 500, 2)]
+    assert [h["hero_id"] for h in hero_stats(ms, since_ts=300)] == [2]
+
+
+def test_hero_stats_limit_and_single_hero():
+    from mmrbot.stats import hero_stats
+    ms = [_m(i, i, i % 3 + 1) for i in range(9)]
+    assert len(hero_stats(ms, limit=2)) == 2
+    assert [h["hero_id"] for h in hero_stats(ms, hero_id=2)] == [2]
+
+
+def test_role_stats_by_position():
+    from mmrbot.stats import role_stats
+    ms = [_m(1, 1, 1, position=1, imp=10), _m(2, 2, 1, rw=False, position=1, imp=0),
+          _m(3, 3, 1, position=5), _m(4, 4, 1)]
+    res = role_stats(ms)
+    assert [r["position"] for r in res] == [1, 5]
+    assert res[0]["games"] == 2 and res[0]["winrate"] == 0.5 and res[0]["avg_imp"] == 5
+
+
+def test_period_since():
+    from mmrbot.stats import period_since
+    assert period_since("day", 1_000_000) == 1_000_000 - 86_400
+    assert period_since("week", 1_000_000) == 1_000_000 - 7 * 86_400
+    assert period_since("month", 1_000_000) == 1_000_000 - 30 * 86_400
+    assert period_since("all", 1_000_000) is None
+
+
+def test_local_day_start_moscow():
+    from datetime import datetime, timezone
+    from mmrbot.stats import local_day_start
+    # 2026-10-01 15:00 МСК (UTC+3) = 12:00 UTC; полночь МСК = 2026-09-30 21:00 UTC
+    now = int(datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+    expected = int(datetime(2026, 9, 30, 21, 0, tzinfo=timezone.utc).timestamp())
+    assert local_day_start(now, "Europe/Moscow") == expected
+
+
+def test_local_day_start_just_after_midnight():
+    from datetime import datetime, timezone
+    from mmrbot.stats import local_day_start
+    # 00:30 МСК = 21:30 UTC накануне → начало суток ровно 30 минут назад
+    now = int(datetime(2026, 9, 30, 21, 30, tzinfo=timezone.utc).timestamp())
+    assert local_day_start(now, "Europe/Moscow") == now - 1800
+
+
+def test_local_day_start_bad_tz_falls_back_to_moscow():
+    from datetime import datetime, timezone
+    from mmrbot.stats import local_day_start
+    now = int(datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+    assert local_day_start(now, "Nope/Zone") == local_day_start(now, "Europe/Moscow")
