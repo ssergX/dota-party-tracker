@@ -342,7 +342,7 @@ def test_cmd_achievements_lists_players(store):
     assert "5 побед подряд" in msg.sent[0][0]
     msg = Msg()
     asyncio.run(botmod.cmd_achievements(msg, CommandObject(command="achievements", args="Никто"), store))
-    assert "не найден" in msg.sent[0][0]
+    assert "Не нашёл" in msg.sent[0][0]
 
 
 class FakeOD:
@@ -505,7 +505,7 @@ def test_cmd_records_and_period_buttons_edit_in_place(store):
     assert marked[0].callback_data == "r:year"
 
 
-# --- «Пульс пати» вместо «Отличий» -------------------------------------
+# --- «Стата пати» вместо «Отличий» -------------------------------------
 
 def test_party_pulse_for_single_player():
     from mmrbot.formatting import render_party_pulse
@@ -515,7 +515,7 @@ def test_party_pulse_for_single_player():
     rows = [{"name": "Вася", "games": 10, "wins": 6, "losses": 4, "delta": 50, "winrate": 0.6, "kda": 3.0}]
     records = compute_records([("Вася", [rec(7, NOW, gpm=800, hero_id=5, kills=20)])])
     text = render_party_pulse([s], rows, records)
-    assert "Пульс пати" in text and "Сегодня: 3 игры · 2–1" in text and "За неделю: 10 игр · 6–4" in text
+    assert "Стата пати" in text and "Сегодня: 3 игры · 2–1" in text and "За неделю: 10 игр · 6–4" in text
     assert "🟢🟢🔴🟢🟢" in text  # хронология слева направо, новые справа
     assert "800 GPM" in text and "dotabuff.com/matches/7" in text and "/records" in text
     assert "Лидер недели" not in text  # один игрок — лидера нет
@@ -555,3 +555,179 @@ def test_graph_cache_avoids_second_render(store, monkeypatch):
     for _ in range(2):
         asyncio.run(service.render_graph_board(store, FakeOD(), 100, "week", refresh=False))
     assert len(calls) == 1
+
+
+def test_chart_spread_labels_separates_close_values():
+    from mmrbot.charts import _spread_labels
+    out = _spread_labels([50, 50, 51], 10)
+    assert all(b - a >= 10 for a, b in zip(sorted(out), sorted(out)[1:]))
+
+
+def test_graph_caption_lists_players_and_cache_depends_on_step(store, monkeypatch):
+    import mmrbot.service as service
+    p = store.add_player(100, 1, "Вася", None, 0, 0)
+    now = int(datetime.now(timezone.utc).timestamp())
+    store.add_matches(p.id, [m(1, now - 3600), m(2, now - 1800, False), m(3, now - 900)])
+    monkeypatch.setattr(service, "render_mmr_chart", lambda *a, **k: b"\x89PNG")
+    service._graph_cache.clear()
+    _, caption = asyncio.run(service.render_graph_board(store, FakeOD(), 100, "week", refresh=False))
+    assert "Вася" in caption and "+25" in caption and "3 игры" in caption and "67%" in caption
+    store.set_chat_step(100, 30)
+    _, caption = asyncio.run(service.render_graph_board(store, FakeOD(), 100, "week", refresh=False))
+    assert "+30" in caption
+
+
+def test_graph_buttons_toggle_and_year():
+    buttons = [b for row in graph_buttons("week", by_games=True).inline_keyboard for b in row]
+    data = [b.callback_data for b in buttons]
+    assert "g:year:n" in data and "g:week" in data  # период сохраняет режим; тумблер возвращает к времени
+
+
+def test_render_chart_by_games_returns_png():
+    png = render_mmr_chart({"Вася": [(NOW, 25), (NOW + 60, 0)], "Петя": [(NOW, -25)]}, "t", "UTC", by_games=True)
+    assert png.startswith(b"\x89PNG")
+
+
+# --- достоверность: свежесть данных в отчётах ----------------------------------
+
+class DownOD(FakeOD):
+    def get_matches(self, account_id, limit=200):
+        raise RuntimeError("OpenDota HTTP 503")
+
+
+def test_board_warns_when_refresh_failed_and_cache_is_shown(store):
+    import mmrbot.service as service
+    p = store.add_player(100, 1, "Вася", 5000, 0, 0)
+    now = int(datetime.now(timezone.utc).timestamp())
+    store.add_matches(p.id, [m(1, now - 7200)])
+    store.touch_player(p.id, now - 3600)                       # последний удачный опрос — час назад
+    text = asyncio.run(service.render_board(store, DownOD(), 100))
+    assert "показаны сохранённые данные" in text and "60 мин назад" in text
+    assert "Вася" in text                                       # сам отчёт из кэша всё равно показан
+
+
+def test_board_has_no_warning_when_data_is_fresh(store):
+    import mmrbot.service as service
+    p = store.add_player(100, 1, "Вася", 5000, 0, 0)
+    now = int(datetime.now(timezone.utc).timestamp())
+    store.add_matches(p.id, [m(1, now - 7200)])
+    for render in (service.render_board, service.render_together_board, service.render_compare_board):
+        assert "сохранённые данные" not in asyncio.run(render(store, FakeOD(), 100))
+
+
+def test_stale_note_names_only_failed_players():
+    from mmrbot.formatting import stale_note
+    from mmrbot.storage import Player
+    fresh = Player(1, 100, 1, "Свежий", None, 0, 0, None, None, updated_ts=NOW - 30)
+    old = Player(2, 100, 2, "Ста<рый", None, 0, 0, None, None, updated_ts=NOW - 7200)
+    never = Player(3, 100, 3, "Новый", None, 0, 0, None, None, updated_ts=None)
+    assert stale_note([fresh], NOW, 180) == ""
+    note = stale_note([fresh, old], NOW, 180)
+    assert "Ста&lt;рый" in note and "Свежий" not in note and "2 ч назад" in note
+    assert "ещё не загружены" in stale_note([never], NOW, 180)
+
+
+def test_graph_cache_is_dropped_when_new_game_arrives(store, monkeypatch):
+    import mmrbot.service as service
+    p = store.add_player(100, 1, "Вася", None, 0, 0)
+    now = int(datetime.now(timezone.utc).timestamp())
+    store.add_matches(p.id, [m(1, now - 3600)])
+    calls = []
+    monkeypatch.setattr(service, "render_mmr_chart", lambda *a, **k: calls.append(1) or b"\x89PNG")
+    service._graph_cache.clear()
+    _, first = asyncio.run(service.render_graph_board(store, FakeOD(), 100, "week", refresh=False))
+    store.add_matches(p.id, [m(2, now - 600)])                 # пришла новая игра
+    _, second = asyncio.run(service.render_graph_board(store, FakeOD(), 100, "week", refresh=False))
+    assert len(calls) == 2 and "+25" in first and "+50" in second   # старая картинка не отдана
+
+
+def test_command_does_not_wait_for_per_match_requests(store):
+    import threading
+    import time as _time
+
+    import mmrbot.service as service
+    p = store.add_player(100, 1, "Вася", 5000, 0, 0)
+    now = int(datetime.now(timezone.utc).timestamp())
+    store.add_matches(p.id, [m(i, now - 3600 * i) for i in range(1, 4)])
+    release = threading.Event()
+    took = {}
+
+    class SlowDetails(FakeOD):
+        def get_match_player_stats(self, match_id, account_id, player_slot=None):
+            release.wait(5)                                    # «медленный» OpenDota: висит, пока не отпустим
+            return {"gpm": 500, "benchmarks": {"gold_per_min": 0.5}}
+
+    async def go():
+        t0 = _time.monotonic()
+        text = await service.render_board(store, SlowDetails(), 100)
+        took["reply"] = _time.monotonic() - t0
+        release.set()
+        for task in list(service._finish_tasks):               # фон доделывает обогащение после ответа
+            await task
+        return text
+
+    assert "Вася" in asyncio.run(go())
+    assert took["reply"] < 2                                   # ответ собран, не дожидаясь запросов на матч
+    assert all(row["enriched"] for row in store.get_matches(p.id))
+    assert not service._finish_running
+
+
+# --- аудит данных: подписи и даты ----------------------------------------
+
+def test_achievement_dates_are_real_match_dates():
+    from mmrbot.achievements import evaluate_timed
+    day = 86_400
+    matches = [
+        {"match_id": i, "start_time": 1_000_000 + i * day, "duration": 1800, "player_slot": 0,
+         "radiant_win": True, "hero_id": 1, "kills": 1, "deaths": 1, "assists": 1}
+        for i in range(1, 8)
+    ]
+    got = evaluate_timed(matches)
+    ts, detail = got["win_streak_5"]
+    assert ts == 1_000_000 + 5 * day + 1800          # серия достигла 5 на пятом матче, а не «сегодня»
+    assert detail == "7"
+    assert "win_streak_10" not in got
+
+
+def test_seeded_achievements_keep_real_dates(tmp_path):
+    from mmrbot.storage import Storage
+    from mmrbot.tracker import check_achievements
+    store = Storage(str(tmp_path / "a.db"))
+    player = store.add_player(1, 5, "Вася", None, 0, 0)
+    store.add_matches(player.id, [
+        {"match_id": i, "start_time": 1000 * i, "player_slot": 0, "radiant_win": True, "lobby_type": 7, "duration": 600}
+        for i in range(1, 7)
+    ])
+    assert check_achievements(store, player, now=9_999_999) == []        # первая проверка — молча
+    stored = store.get_achievements(player.id)
+    assert stored["win_streak_5"][0] == 5000 + 600                        # не 9_999_999
+
+
+def test_fmt_local_uses_chat_timezone():
+    from mmrbot.formatting import fmt_local
+    ts = 1_700_000_000 + 21 * 3600 - 1_700_000_000 % 86400   # 21:00 UTC
+    assert fmt_local(ts, "UTC", "%d.%m %H:%M").endswith("21:00 UTC")
+    assert fmt_local(ts, "Europe/Moscow", "%d.%m %H:%M").endswith("00:00")  # полночь следующего дня по МСК
+    assert fmt_local(ts, "Europe/Moscow", "%d.%m %H:%M").startswith(fmt_local(ts + 86400, "UTC", "%d.%m"))
+
+
+def test_awards_detail_declines_games_word():
+    from mmrbot.awards import _games
+    assert [_games(n) for n in (1, 2, 5, 11, 21, 22, 25, 111)] == [
+        "1 игра", "2 игры", "5 игр", "11 игр", "21 игра", "22 игры", "25 игр", "111 игр"]
+
+
+def test_long_match_still_notified_when_it_ended_inside_window(tmp_path):
+    """Матч начался 3 ч 20 мин назад, но закончился 20 минут назад — оповестить надо."""
+    from mmrbot.storage import Storage
+    store = Storage(str(tmp_path / "w.db"))
+    player = store.add_player(1, 5, "Вася", None, 0, 0)
+    now = 1_000_000
+    store.add_matches(player.id, [
+        {"match_id": 1, "start_time": now - 3 * 3600 - 1200, "duration": 3 * 3600, "player_slot": 0,
+         "radiant_win": True, "lobby_type": 7},
+        {"match_id": 2, "start_time": now - 6 * 3600, "duration": 2400, "player_slot": 0,
+         "radiant_win": True, "lobby_type": 7},      # давно закончился
+    ])
+    got = store.get_unnotified_matches(player.id, now - 3 * 3600)
+    assert [m["match_id"] for m in got] == [1]

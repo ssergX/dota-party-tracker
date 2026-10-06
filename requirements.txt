@@ -1,4 +1,4 @@
-aiogram==3.13.1
+aiogram==3.26.0
 APScheduler==3.10.4
 requests==2.32.3
 python-dotenv==1.0.1

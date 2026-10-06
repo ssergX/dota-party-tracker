@@ -13,6 +13,7 @@ from mmrbot.charts import warmup
 from mmrbot.config import load_config
 from mmrbot.opendota import OpenDota
 from mmrbot.scheduler import setup_scheduler
+from mmrbot.steam import Steam
 from mmrbot.stratz import Stratz
 from mmrbot.storage import Storage
 
@@ -25,8 +26,11 @@ async def main() -> None:
     config = load_config()
 
     storage = Storage(config.db_path)
-    od = OpenDota(api_key=config.opendota_api_key)
+    od = OpenDota(
+        api_key=config.opendota_api_key, min_interval=config.opendota_min_interval, burst=config.opendota_burst
+    )
     stratz = Stratz(config.stratz_api_key) if config.stratz_api_key else None
+    steam = Steam(config.steam_api_key) if config.steam_api_key else None
 
     bot = Bot(config.bot_token, default=DefaultBotProperties(link_preview_is_disabled=True))
     dp = Dispatcher()
@@ -44,7 +48,7 @@ async def main() -> None:
     await set_bot_commands(bot)
     asyncio.get_running_loop().run_in_executor(None, warmup)  # прогрев matplotlib: первый график без задержки
 
-    scheduler = setup_scheduler(bot, storage, od, stratz, backup_keep=config.backup_keep)
+    scheduler = setup_scheduler(bot, storage, od, stratz, backup_keep=config.backup_keep, steam=steam)
     scheduler.start()
     logging.getLogger(__name__).info("Бот запущен (long-polling). Ctrl+C для остановки.")
     try:

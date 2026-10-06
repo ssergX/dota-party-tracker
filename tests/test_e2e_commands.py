@@ -51,7 +51,7 @@ class FakeOD:
     def get_gpm_distribution(self, account_id):
         return {"median": 600, "best": 900}
 
-    def get_match_player_stats(self, match_id, account_id):
+    def get_match_player_stats(self, match_id, account_id, player_slot=None):
         return {"gpm": 650, "xpm": 720, "last_hits": 400, "denies": 12, "hero_damage": 30000,
                 "tower_damage": 4000, "hero_healing": 0, "net_worth": 25000, "level": 24,
                 "benchmarks": {"gold_per_min": 0.7, "xp_per_min": 0.6}}
@@ -61,7 +61,7 @@ class FakeStratz:
     def __init__(self):
         self.full_requests = []
 
-    def get_matches(self, account_id, match_ids):
+    def get_matches(self, account_id, match_ids, hints=None):
         by_id = {g[0]: g for g in GAMES}
         return {
             mid: {"position": by_id[mid][8], "role": "CORE", "lane": "SAFE_LANE", "imp": by_id[mid][9],
@@ -192,7 +192,7 @@ def test_heroes_hero_view(env, args):
 
 def test_heroes_unknown_name(env):
     msg = call(botmod.cmd_heroes, "heroes", "абракадабра", env)
-    assert "не найден" in msg.texts
+    assert "Не нашёл" in msg.texts
 
 
 @pytest.mark.parametrize("args", [None, "последний", "@shinoame", "shinoame последний"])
@@ -212,7 +212,7 @@ def test_match_by_id_any_match_without_stratz_cache(env):
 
 def test_match_unknown_id(env):
     msg = call(botmod.cmd_match, "match", "9999999999", env)
-    assert "в Stratz не найден" in msg.texts
+    assert "не найден в Stratz" in msg.texts
 
 
 def test_match_by_id_for_stranger_works_when_chat_has_no_players(tmp_path):
@@ -230,7 +230,7 @@ def test_match_latest_falls_back_to_cache_without_stratz(env):
 
 def test_match_without_stratz_and_id_asks_for_key(env):
     msg = call(botmod.cmd_match, "match", "9100000005", env, stratz=False)
-    assert "STRATZ_API_KEY" in msg.texts
+    assert "Stratz" in msg.texts
 
 
 @pytest.mark.parametrize("args", [None, "shinoame", "@shinoame"])
@@ -261,14 +261,14 @@ def test_add_by_dotabuff_link_and_steam_vanity(tmp_path, monkeypatch):
     msg = FakeMessage()
     run(botmod.cmd_add(msg, cmdobj("add", "https://ru.dotabuff.com/players/1105542592 shinoame 5000"),
                        storage, FakeOD(), FakeStratz()))
-    assert "Игрок shinoame (id" in msg.texts
+    assert "shinoame добавлен" in msg.texts
     assert storage.get_player(100, "shinoame").account_id == ACC
 
     monkeypatch.setattr(botmod, "resolve_account_id", lambda text: 4242)
     msg = FakeMessage()
     run(botmod.cmd_add(msg, cmdobj("add", "https://steamcommunity.com/id/some_name Вася"),
                        storage, FakeOD(), FakeStratz()))
-    assert "Игрок Вася (id 4242) добавлен" in msg.texts
+    assert "Вася добавлен" in msg.texts
 
 
 def test_setmmr_setstep_settime_remove(env):
@@ -316,8 +316,9 @@ def test_period_buttons_edit_message_in_place(env):
 
 
 def test_all_menu_buttons_have_handlers():
-    from mmrbot.keyboards import main_menu
-    actions = {b.callback_data for row in main_menu().inline_keyboard for b in row}
+    from mmrbot.keyboards import CATEGORIES, category_menu, main_menu
+    markups = [main_menu()] + [category_menu(key) for key in CATEGORIES]
+    actions = {b.callback_data for m in markups for row in m.inline_keyboard for b in row}
     assert "m:roles" not in actions and {"m:heroes", "m:match", "m:stats"} <= actions
 
 
@@ -359,15 +360,27 @@ class DeletableMessage(FakeMessage):
         self.deleted = True
 
 
-def test_menu_button_deletes_source_message_and_status(env):
+def test_menu_button_edits_source_message_in_place(env):
     storage, od, sz = env
     cb = FakeCallback("m:week")
     cb.message = DeletableMessage()
     run(botmod.on_callback(cb, storage, od, sz))
-    assert cb.message.deleted  # старое меню убрано
-    assert cb.message.statuses[0].deleted  # «Формирование…» убрано
+    assert not cb.message.deleted and not cb.message.statuses  # одно сообщение: новых не плодим
+    assert len(cb.message.sent) >= 2  # сначала «ждём», потом отчёт — оба правят то же сообщение
     markup = cb.message.sent[-1][1]["reply_markup"]  # под отчётом «В меню» / «Закрыть»
-    assert {b.callback_data for row in markup.inline_keyboard for b in row} == {"m:menu", "x:close"}
+    data = {b.callback_data for row in markup.inline_keyboard for b in row}
+    assert {"m:menu", "x:close"} <= data and {"m:stats", "m:today", "m:week", "m:month"} <= data  # + вкладки периодов
+
+
+def test_category_button_opens_submenu(env):
+    storage, od, sz = env
+    cb = FakeCallback("m:c:stats")
+    cb.message = DeletableMessage()
+    run(botmod.on_callback(cb, storage, od, sz))
+    assert not cb.message.deleted and not cb.message.statuses  # подменю правит то же сообщение
+    markup = cb.message.sent[-1][1]["reply_markup"]
+    data = {b.callback_data for row in markup.inline_keyboard for b in row}
+    assert {"m:stats", "m:week", "m:menu"} <= data
 
 
 def test_close_button_deletes_message(env):

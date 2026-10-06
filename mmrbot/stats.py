@@ -139,11 +139,14 @@ def winrate_by_hour(matches: list[dict], tz_name: str) -> dict[int, tuple[int, i
 
 
 def solo_party_split(matches: list[dict]) -> dict[str, tuple[int, int]]:
-    """Соло (party_size<=1 или отсутствует) vs пати: bucket -> (игр, побед)."""
-    buckets = {"solo": [0, 0], "party": [0, 0]}
+    """Соло (party_size == 1) / пати (>1) / неизвестно (размер не пришёл): bucket -> (игр, побед).
+
+    Неизвестный размер раньше считался соло и искажал сравнение «соло vs группа».
+    """
+    buckets = {"solo": [0, 0], "party": [0, 0], "unknown": [0, 0]}
     for match in matches:
-        party_size = match.get("party_size") or 1
-        key = "party" if party_size > 1 else "solo"
+        party_size = match.get("party_size")
+        key = "unknown" if not party_size else "party" if party_size > 1 else "solo"
         buckets[key][0] += 1
         if is_win(match["player_slot"], match["radiant_win"]):
             buckets[key][1] += 1
@@ -159,8 +162,7 @@ _POSITIVE_BENCHMARKS = {
     "last_hits_per_min",
     "hero_damage_per_min",
     "hero_healing_per_min",
-    "tower_damage_per_min",
-    "stuns_per_min",
+    "tower_damage",  # так benchmark называется в OpenDota (не per_min)
 }
 
 
@@ -216,14 +218,19 @@ def recent_form(matches: list[dict], n: int = 5) -> list[bool]:
     return [is_win(m["player_slot"], m["radiant_win"]) for m in tail]
 
 
+BEST_GAME_MIN_KA = 10  # меньше убийств+помощи игра «лучшей» не бывает (0 смертей при 2 помощи — не рекорд)
+
+
 def best_game(matches: list[dict]) -> Optional[dict]:
-    """Матч с максимальным KDA. Возвращает kills/deaths/assists/hero_id/kda или None."""
+    """Матч с максимальным KDA среди содержательных игр (k+a >= порога). kills/deaths/assists/hero_id/kda или None."""
     best = None
     best_kda = -1.0
     for match in matches:
         kills = match.get("kills", 0) or 0
         deaths = match.get("deaths", 0) or 0
         assists = match.get("assists", 0) or 0
+        if kills + assists < BEST_GAME_MIN_KA:
+            continue
         kda = (kills + assists) / max(deaths, 1)
         if kda > best_kda:
             best_kda = kda

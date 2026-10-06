@@ -150,34 +150,30 @@ def test_get_totals_handles_missing_fields():
     assert totals == {"gpm": None, "xpm": None, "last_hits": None}
 
 
-def test_concurrent_calls_are_serialized_by_lock():
-    """Один общий клиент из нескольких потоков не должен делать запросы одновременно."""
+def test_concurrent_calls_respect_throttle_but_overlap():
+    """Потоки не стоят в очереди целиком (запросы перекрываются), но старты разнесены троттлингом."""
     import threading
     import time
 
-    class ConcurrencyProbe:
-        def __init__(self):
-            self.active = 0
-            self.max_active = 0
-            self._lock = threading.Lock()
+    starts = []
 
+    class Probe:
         def get(self, url, params=None, timeout=None):
-            with self._lock:
-                self.active += 1
-                self.max_active = max(self.max_active, self.active)
-            time.sleep(0.02)
-            with self._lock:
-                self.active -= 1
+            starts.append(time.monotonic())
+            time.sleep(0.05)
             return FakeResp({"rank_tier": 11})
 
-    probe = ConcurrencyProbe()
-    od = OpenDota(session=probe, min_interval=0)
-    threads = [threading.Thread(target=lambda: od.get_profile(1)) for _ in range(8)]
+    od = OpenDota(session=Probe(), min_interval=0.03)
+    threads = [threading.Thread(target=lambda: od.get_profile(1)) for _ in range(5)]
+    t0 = time.monotonic()
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert probe.max_active == 1  # запросы не пересекались
+    elapsed = time.monotonic() - t0
+    starts.sort()
+    assert all(b - a >= 0.025 for a, b in zip(starts, starts[1:]))  # частота запросов в лимите
+    assert elapsed < 5 * 0.05  # быстрее полностью последовательного выполнения
 
 
 class PagedSession(FakeSession):
@@ -265,3 +261,152 @@ def test_invalid_json_is_retried(monkeypatch):
     session = SeqSession([BadJsonResp({}), FakeResp({"rank_tier": 9})])
     od = OpenDota(session=session, min_interval=0)
     assert od.get_profile(1)["rank_tier"] == 9
+
+
+# --- достоверность и скорость сбора ------------------------------------------
+
+def test_aggregates_are_ranked_only():
+    """totals/counts/histograms без фильтра считают все режимы — бот показывает только ранкед."""
+    session = FakeSession([])
+    od = OpenDota(session=session, min_interval=0)
+    od.get_totals(42)
+    od.get_lanes(42)
+    od.get_gpm_distribution(42)
+    assert [c["params"] for c in session.calls] == [{"lobby_type": 7}] * 3
+
+
+def test_get_recent_matches_endpoint():
+    session = FakeSession([{"match_id": 1, "gold_per_min": 500}])
+    od = OpenDota(session=session, min_interval=0)
+    assert od.get_recent_matches(42)[0]["gold_per_min"] == 500
+    assert session.calls[0]["url"].endswith("/players/42/recentMatches")
+
+
+def test_shared_match_is_fetched_once_for_all_party_members():
+    match = {"players": [{"account_id": 1, "gold_per_min": 500}, {"account_id": 2, "gold_per_min": 300}]}
+    session = FakeSession(match)
+    od = OpenDota(session=session, min_interval=0)
+    assert od.get_match_player_stats(900, 1)["gpm"] == 500
+    assert od.get_match_player_stats(900, 2)["gpm"] == 300
+    assert len(session.calls) == 1  # второй участник той же игры — из кэша
+
+
+def test_empty_match_is_not_cached():
+    session = FakeSession({})
+    od = OpenDota(session=session, min_interval=0)
+    od.get_match_player_stats(900, 1)
+    od.get_match_player_stats(900, 1)
+    assert len(session.calls) == 2  # матч мог ещё не доехать до OpenDota — спросим снова
+
+
+def test_party_size_from_party_id_on_same_side():
+    match = {"players": [
+        {"account_id": 1, "player_slot": 0, "party_id": 7},
+        {"account_id": 2, "player_slot": 1, "party_id": 7},
+        {"account_id": 3, "player_slot": 2, "party_id": 9},
+        {"account_id": 4, "player_slot": 128, "party_id": 7},   # другая сторона — не в счёт
+        {"account_id": 5, "player_slot": 129, "party_size": 3, "party_id": 1},
+    ]}
+    od = OpenDota(session=FakeSession(match), min_interval=0)
+    assert od.get_match_player_stats(1, 1)["party_size"] == 2
+    assert od.get_match_player_stats(1, 3)["party_size"] == 1
+    assert od.get_match_player_stats(1, 5)["party_size"] == 3   # готовое значение OpenDota важнее
+
+
+def test_long_rate_limit_fails_fast_and_blocks_next_calls(monkeypatch):
+    from mmrbot.opendota import RateLimited
+    sleeps = _no_sleep(monkeypatch)
+    session = SeqSession([RespWithHeaders({}, 429, {"Retry-After": "3600"}), FakeResp({"rank_tier": 5})])
+    od = OpenDota(session=session, min_interval=0)
+    for _ in range(2):
+        try:
+            od.get_profile(1)
+            assert False, "ожидали RateLimited"
+        except RateLimited:
+            pass
+    assert sleeps == []                # не висим час в команде пользователя
+    assert len(session.calls) == 1     # второй вызов в сеть не ходил — пауза ещё идёт
+    assert od.refresh(1) is False and session.post_calls == []
+
+
+def test_rate_limit_block_expires(monkeypatch):
+    from mmrbot.opendota import RateLimited
+    _no_sleep(monkeypatch)
+    session = SeqSession([RespWithHeaders({}, 429, {"Retry-After": "60"}), FakeResp({"rank_tier": 5})])
+    od = OpenDota(session=session, min_interval=0)
+    try:
+        od.get_profile(1)
+    except RateLimited:
+        pass
+    od._blocked_until = 0.0  # пауза истекла
+    assert od.get_profile(1)["rank_tier"] == 5
+
+
+def test_burst_lets_first_requests_go_without_waiting(monkeypatch):
+    """Пачка в пределах burst уходит сразу, дальше — по одному в min_interval (в сумме лимит не превышен)."""
+    sleeps = _no_sleep(monkeypatch)
+    clock = [1000.0]
+    monkeypatch.setattr("mmrbot.opendota.time.monotonic", lambda: clock[0])
+    od = OpenDota(session=FakeSession({"rank_tier": 1}), min_interval=1.0, burst=3)
+    for _ in range(5):
+        od.get_profile(1)
+    assert [round(s, 3) for s in sleeps] == [1.0, 2.0]    # 3 сразу, 4-й и 5-й — по расписанию
+    clock[0] += 60                                         # простой — ведро снова полное
+    sleeps.clear()
+    od.get_profile(1)
+    assert sleeps == []
+
+
+def test_default_burst_keeps_strict_spacing(monkeypatch):
+    sleeps = _no_sleep(monkeypatch)
+    monkeypatch.setattr("mmrbot.opendota.time.monotonic", lambda: 1000.0)
+    od = OpenDota(session=FakeSession({"rank_tier": 1}), min_interval=1.0)
+    od.get_profile(1)
+    od.get_profile(1)
+    assert sleeps == [1.0]
+
+
+def test_refresh_post_is_rate_limited_per_account():
+    session = FakeSession({})
+    od = OpenDota(session=session, min_interval=0)
+    assert od.refresh(42) is True
+    assert od.refresh(42) is False       # повторный пинок того же игрока — не шлём
+    assert od.refresh(43) is True        # другой игрок — шлём
+    assert len(session.post_calls) == 2
+
+
+def test_failed_refresh_post_can_be_retried():
+    class Flaky(FakeSession):
+        def post(self, url, timeout=None):
+            self.post_calls.append({"url": url})
+            if len(self.post_calls) == 1:
+                raise RuntimeError("network down")
+            return FakeResp({})
+
+    od = OpenDota(session=Flaky({}), min_interval=0)
+    assert od.refresh(42) is False
+    assert od.refresh(42) is True
+
+
+def test_party_id_zero_means_unknown_not_a_group():
+    """party_id = 0 у одиночек: пять одиночек на стороне не должны стать «пати из 5»."""
+    match = {"players": [{"account_id": i, "player_slot": i - 1, "party_id": 0} for i in range(1, 6)]}
+    od = OpenDota(session=FakeSession(match), min_interval=0)
+    assert od.get_match_player_stats(2, 1)["party_size"] is None
+
+
+def test_hidden_profile_found_by_player_slot():
+    """У скрытого профиля account_id в матче обнулён — игрока находим по сохранённому слоту."""
+    match = {"players": [
+        {"account_id": None, "player_slot": 3, "gold_per_min": 555},
+        {"account_id": 9, "player_slot": 130, "gold_per_min": 100},
+    ]}
+    od = OpenDota(session=FakeSession(match), min_interval=0)
+    assert od.get_match_player_stats(3, 42) is None
+    assert od.get_match_player_stats(3, 42, player_slot=3)["gpm"] == 555
+
+
+def test_get_heroes_returns_list_or_empty():
+    heroes = [{"id": 1, "localized_name": "Anti-Mage"}]
+    assert OpenDota(session=FakeSession(heroes), min_interval=0).get_heroes() == heroes
+    assert OpenDota(session=FakeSession({"oops": 1}), min_interval=0).get_heroes() == []

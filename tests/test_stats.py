@@ -188,10 +188,11 @@ def test_solo_party_split():
     assert split["party"] == (1, 1)
 
 
-def test_solo_party_handles_missing_party_size():
-    matches = [make(0, True)]  # без party_size → считаем solo
+def test_solo_party_missing_party_size_is_unknown_not_solo():
+    matches = [make(0, True), pmatch(1, 0, False)]  # у первой размер пати неизвестен
     split = solo_party_split(matches)
-    assert split["solo"] == (1, 1)
+    assert split["unknown"] == (1, 1)
+    assert split["solo"] == (1, 0)
 
 
 # --- duration_stats -----------------------------------------------------
@@ -414,3 +415,22 @@ def test_local_day_start_bad_tz_falls_back_to_moscow():
     from mmrbot.stats import local_day_start
     now = int(datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc).timestamp())
     assert local_day_start(now, "Nope/Zone") == local_day_start(now, "Europe/Moscow")
+
+
+# --- аудит данных: точность ---------------------------------------------
+
+def test_perf_score_counts_tower_damage_benchmark():
+    """OpenDota отдаёт benchmark `tower_damage` (не `..._per_min`) — он должен входить в perf."""
+    from mmrbot.stats import perf_score
+    assert perf_score({"gold_per_min": 0.5, "tower_damage": 0.9}) == pytest.approx(0.7)
+
+
+def test_best_game_ignores_low_activity_games():
+    """«0 смертей, 2 помощи» (KDA 2) не должен быть лучшей игрой, когда есть настоящая."""
+    matches = [make(0, True, k=0, d=0, a=9), make(0, True, k=8, d=4, a=8)]
+    best = best_game(matches)
+    assert (best["kills"], best["assists"]) == (8, 8)
+
+
+def test_best_game_none_when_no_game_reaches_threshold():
+    assert best_game([make(0, True, k=1, d=0, a=1)]) is None

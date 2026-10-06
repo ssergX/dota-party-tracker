@@ -30,7 +30,7 @@ def test_cmd_stats_handles_render_error_gracefully(monkeypatch):
     msg = FakeMessage()
     asyncio.run(botmod.cmd_stats(msg, CommandObject(command="stats"), FakeStorage(), object()))
     # хендлер не должен падать; пользователь получает понятное сообщение об ошибке
-    assert any(("не удалось" in t.lower()) or ("ошибка" in t.lower()) for t in msg.sent)
+    assert any(("не получилось" in t.lower()) or ("ошибка" in t.lower()) for t in msg.sent)
 
 
 def test_cmd_today_handles_render_error_gracefully(monkeypatch):
@@ -40,4 +40,4 @@ def test_cmd_today_handles_render_error_gracefully(monkeypatch):
     monkeypatch.setattr(botmod, "render_board", boom)
     msg = FakeMessage()
     asyncio.run(botmod.cmd_stats(msg, CommandObject(command="today"), FakeStorage(), object()))
-    assert any(("не удалось" in t.lower()) or ("ошибка" in t.lower()) for t in msg.sent)
+    assert any(("не получилось" in t.lower()) or ("ошибка" in t.lower()) for t in msg.sent)

@@ -323,3 +323,99 @@ def test_connection_uses_wal_and_busy_timeout(tmp_path):
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 10_000
     finally:
         conn.close()
+
+
+def test_conn_context_closes_connection(tmp_path):
+    import sqlite3
+
+    storage = Storage(str(tmp_path / "t.db"))
+    with storage._conn() as conn:
+        conn.execute("SELECT 1")
+    try:
+        conn.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        pass
+    else:
+        raise AssertionError("соединение должно быть закрыто после with")
+
+
+# --- дозаполнение и лёгкие запросы --------------------------------------------
+
+def test_add_matches_fills_empty_fields_without_overwriting(store):
+    p = store.add_player(100, 42, "Вася", 5000, 0, 0)
+    assert store.add_matches(p.id, [match(1, 100)]) == 1          # party_size/duration ещё неизвестны
+    later = {**match(1, 100, k=99), "party_size": 3, "duration": 1800, "average_rank": 55, "gpm": 512}
+    assert store.add_matches(p.id, [later, match(2, 200)]) == 1   # новый только матч 2
+    row = store.get_matches(p.id)[0]
+    assert (row["party_size"], row["duration"], row["average_rank"], row["gpm"]) == (3, 1800, 55, 512)
+    assert row["kills"] == 1                                       # исход/KDA сохранённого матча не трогаем
+    store.add_matches(p.id, [{**match(1, 100), "party_size": 5}])
+    assert store.get_matches(p.id)[0]["party_size"] == 3           # известное значение не затирается
+
+
+def test_match_details_do_not_erase_known_values(store):
+    p = store.add_player(100, 42, "Вася", 5000, 0, 0)
+    store.add_matches(p.id, [{**match(1, 100), "gpm": 512, "party_size": 2}])
+    store.update_match_details(p.id, 1, {"gpm": None, "net_worth": 18000, "benchmarks": {}}, None)
+    row = store.get_matches(p.id)[0]
+    assert row["gpm"] == 512 and row["net_worth"] == 18000 and row["party_size"] == 2 and row["enriched"] == 1
+
+
+def test_has_matches_latest_and_data_version(store):
+    a = store.add_player(100, 1, "A", None, 0, 0)
+    b = store.add_player(100, 2, "B", None, 0, 0)
+    assert store.has_matches(a.id) is False and store.latest_match_time(a.id) is None
+    assert store.data_version(100) == (0, None) and store.last_activity(100) is None
+    store.add_matches(a.id, [match(1, 100), {**match(2, 300), "duration": 60}])
+    store.add_matches(b.id, [match(3, 200)])
+    assert store.has_matches(a.id) and store.latest_match_time(a.id) == 300
+    assert store.data_version(100) == (3, 300)
+    assert store.last_activity(100) == 360
+    assert store.data_version(999) == (0, None)                   # чужой чат не влияет
+
+
+def test_get_latest_match_across_players_and_by_id(store):
+    a = store.add_player(100, 1, "A", None, 0, 0)
+    b = store.add_player(100, 2, "B", None, 0, 0)
+    store.add_matches(a.id, [match(1, 100), match(2, 300)])
+    store.add_matches(b.id, [match(3, 200)])
+    assert store.get_latest_match([a.id, b.id])["match_id"] == 2
+    assert store.get_latest_match([b.id])["match_id"] == 3
+    assert store.get_latest_match([a.id, b.id], match_id=1)["player_id"] == a.id
+    assert store.get_latest_match([a.id], match_id=3) is None
+    assert store.get_latest_match([]) is None
+
+
+def test_migration_adds_new_player_columns(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    Storage(path)
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE players DROP COLUMN profile_ts")
+    conn.execute("ALTER TABLE players DROP COLUMN history_ts")
+    conn.commit()
+    conn.close()
+    st = Storage(path)                                             # старая БД — колонки добавятся
+    p = st.add_player(100, 1, "A", None, 0, 0)
+    st.set_player_rank(p.id, 63, None, 500)
+    st.touch_player(p.id, 700, deep=True)
+    got = st.get_player(100, "A")
+    assert (got.last_rank_tier, got.profile_ts, got.updated_ts, got.history_ts) == (63, 500, 700, 700)
+
+
+def test_get_match_sides_is_light_and_ordered(store):
+    p = store.add_player(100, 42, "Вася", 5000, 0, 0)
+    store.add_matches(p.id, [match(2, 300, slot=130, radiant_win=False), match(1, 100)])
+    rows = store.get_match_sides(p.id)
+    assert [r["match_id"] for r in rows] == [1, 2]
+    assert set(rows[0]) == {"match_id", "start_time", "player_slot", "radiant_win", "party_size"}
+    assert [r["match_id"] for r in store.get_match_sides(p.id, since_ts=200)] == [2]
+
+
+def test_add_player_rejects_nick_differing_only_in_case(tmp_path):
+    store = Storage(str(tmp_path / "n.db"))
+    store.add_player(1, 10, "Вася", None, 0, 0)
+    with pytest.raises(ValueError):
+        store.add_player(1, 11, "вася", None, 0, 0)
+    assert store.nick_taken(1, "ВАСЯ") and not store.nick_taken(2, "Вася")
+    store.add_player(2, 11, "вася", None, 0, 0)  # в другом чате можно

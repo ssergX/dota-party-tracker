@@ -58,3 +58,32 @@ def rank_label(rank_tier: Optional[int], leaderboard_rank: Optional[int] = None)
     if star:
         return f"{name} {star}"
     return name
+
+
+MEDAL_STEP = 770   # MMR-ширина одной медали (Herald..Divine)
+STAR_STEP = 154    # и одной звезды внутри медали
+MMR_DRIFT_TOLERANCE = 350  # на сколько оценка может разойтись с медалью, прежде чем это считаем расхождением
+
+
+def rank_mmr_range(rank_tier: Optional[int]) -> Optional[tuple[int, Optional[int]]]:
+    """Примерный диапазон MMR для медали со звёздами: (от, до); у Immortal верхней границы нет (None)."""
+    if not rank_tier:
+        return None
+    medal, star = rank_tier // 10, rank_tier % 10
+    if medal == 8:
+        return (5620, None)
+    if not 1 <= medal <= 7:
+        return None
+    low = (medal - 1) * MEDAL_STEP + max(star - 1, 0) * STAR_STEP
+    return (low, low + STAR_STEP)
+
+
+def mmr_rank_mismatch(current_mmr: Optional[int], rank_tier: Optional[int]) -> bool:
+    """Оценка MMR заметно расходится с медалью — шаг ±MMR накопил ошибку, пора обновить /setmmr."""
+    span = rank_mmr_range(rank_tier)
+    if current_mmr is None or span is None:
+        return False
+    low, high = span
+    if current_mmr < low - MMR_DRIFT_TOLERANCE:
+        return True
+    return high is not None and current_mmr > high + MMR_DRIFT_TOLERANCE

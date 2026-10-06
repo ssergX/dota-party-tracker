@@ -1,7 +1,7 @@
 """Совместная игра пати: общие матчи участников и статистика вместе.
 
 Игроки передаются как список (имя, матчи). Матч: match_id, player_slot, radiant_win.
-«Совместная игра» = один match_id есть у >=2 участников И они на одной стороне
+«Совместная игра» = один match_id есть у >=2 участников, они на одной стороне и не были соло в лобби
 (иначе исход у них разный — не засчитываем как совместную).
 """
 from __future__ import annotations
@@ -13,7 +13,13 @@ from mmrbot.stats import is_win
 
 
 def _win_map(matches: list[dict]) -> dict[int, bool]:
-    return {m["match_id"]: is_win(m["player_slot"], m["radiant_win"]) for m in matches}
+    """match_id -> победа. Игра, где игрок точно был один в лобби (party_size == 1), в совместные не идёт:
+    двое из чата оказались на одной стороне случайно. Размер пати неизвестен — даём игре шанс."""
+    return {
+        m["match_id"]: is_win(m["player_slot"], m["radiant_win"])
+        for m in matches
+        if m.get("party_size") != 1
+    }
 
 
 def together_summary(players: list[tuple[str, list[dict]]]) -> dict:

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Telegram-бот: групповой трекер MMR/статистики Dota 2 по данным OpenDota"
 requires-python = ">=3.12"
 dependencies = [
-    "aiogram==3.13.1",
+    "aiogram==3.26.0",
     "APScheduler==3.10.4",
     "requests==2.32.3",
     "python-dotenv==1.0.1",

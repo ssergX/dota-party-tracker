@@ -59,3 +59,14 @@ def test_emoji_ancient():
 def test_emoji_none_is_empty():
     assert rank_emoji(None) == ""
     assert rank_emoji(0) == ""
+
+
+def test_mmr_rank_mismatch_detects_drift():
+    from mmrbot.ranks import mmr_rank_mismatch, rank_mmr_range
+    assert rank_mmr_range(None) is None and rank_mmr_range(0) is None
+    assert mmr_rank_mismatch(None, 55) is False and mmr_rank_mismatch(3200, None) is False
+    assert mmr_rank_mismatch(3300, 52) is False        # Legend 2 ≈ 3234–3388
+    assert mmr_rank_mismatch(4500, 52) is True         # оценка ушла на пол-медали вверх
+    assert mmr_rank_mismatch(2000, 52) is True
+    assert mmr_rank_mismatch(5900, 81) is False        # Immortal — только нижняя граница
+    assert mmr_rank_mismatch(4000, 81) is True

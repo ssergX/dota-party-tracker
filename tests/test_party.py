@@ -88,3 +88,13 @@ def test_together_skips_even_split():
         ("D", [wm(60, 129, True)]),
     ]
     assert together_summary(players)["games"] == 0
+
+
+def test_together_ignores_games_where_a_player_was_solo():
+    """Двое из чата на одной стороне, но один из них в соло-лобби — это совпадение, а не совместная игра."""
+    solo = {**win(1), "party_size": 1}
+    duo = {**win(2), "party_size": 2}
+    unknown = win(3)
+    players = [("Alice", [solo, duo, unknown]), ("Bob", [{**win(1), "party_size": 2}, {**win(2), "party_size": 2}, win(3)])]
+    assert together_summary(players)["games"] == 2          # матч 1 не считается; 2 (пати) и 3 (размер неизвестен) — да
+    assert best_duo(players)["games"] == 2

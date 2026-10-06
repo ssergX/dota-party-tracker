@@ -9,7 +9,7 @@ def _spy(monkeypatch):
     state = {"running": 0, "max": 0}
     guard = threading.Lock()
 
-    def fake_build(storage, od, chat_id, now, refresh, stratz):
+    def fake_build(storage, od, chat_id, now, refresh, stratz, fast=False):
         with guard:
             state["running"] += 1
             state["max"] = max(state["max"], state["running"])

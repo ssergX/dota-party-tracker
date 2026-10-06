@@ -170,7 +170,8 @@ def press(store, data):
 
 def test_menu_opens_settings(store):
     cb = press(store, "m:settings")
-    assert "⚙️" in cb.message.sent[0][0] and cb.message.sent[0][1]["reply_markup"] is not None
+    assert not cb.message.sent  # правим то же сообщение, а не шлём новое
+    assert "⚙️" in cb.message.edited[0][0] and cb.message.edited[0][1]["reply_markup"] is not None
 
 
 @pytest.mark.parametrize("data,check", [

@@ -139,3 +139,15 @@ def test_party_size_counts_teammates_with_same_party_id():
 def test_party_size_is_one_when_no_party_id():
     session = FakeSession([{"data": {"m0": _party_match(None, [(1, True, None), (2, False, None)])}}])
     assert Stratz("k", session=session, min_interval=0).get_matches(42, [5])[5]["party_size"] == 1
+
+
+def test_hidden_profile_found_by_side_and_hero():
+    rows = [
+        {"steamAccountId": None, "isRadiant": True, "heroId": 8, "position": "POSITION_2", "imp": 3},
+        {"steamAccountId": 7, "isRadiant": True, "heroId": 9, "position": "POSITION_1", "imp": 1},
+        {"steamAccountId": None, "isRadiant": False, "heroId": 8, "position": "POSITION_4", "imp": 0},
+    ]
+    session = FakeSession([{"data": {"m0": {"lobbyType": "RANKED", "players": rows}}}] * 2)
+    st = Stratz("k", session=session, min_interval=0)
+    assert st.get_matches(42, [1]) == {}                                   # без подсказки — не угадываем
+    assert st.get_matches(42, [1], hints={1: (True, 8)})[1]["position"] == 2

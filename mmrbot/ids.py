@@ -24,13 +24,13 @@ def _to_account_id(number: int) -> int:
 def parse_account_id(text: str) -> int:
     raw = (text or "").strip()
     if not raw:
-        raise ValueError("Пустой идентификатор. Дай ссылку Dotabuff/OpenDota или числовой ID.")
+        raise ValueError("Нужна ссылка Dotabuff/OpenDota или числовой ID.")
 
     # Steam vanity-ссылка — без Steam API-ключа не разрешить.
     if re.search(r"steamcommunity\.com/id/", raw, flags=re.IGNORECASE):
         raise ValueError(
-            "Не могу определить ID по кастомной Steam-ссылке (/id/...). "
-            "Дай ссылку Dotabuff/OpenDota (.../players/<id>) или числовой ID."
+            "Кастомную Steam-ссылку (/id/...) не разобрать. "
+            "Пришлите ссылку Dotabuff/OpenDota (.../players/<id>) или числовой ID."
         )
 
     # .../players/<id> (Dotabuff, OpenDota, Stratz) — id уже account_id.
@@ -48,8 +48,7 @@ def parse_account_id(text: str) -> int:
         return _to_account_id(int(raw))
 
     raise ValueError(
-        "Не понял идентификатор. Пришли ссылку Dotabuff/OpenDota (.../players/<id>) "
-        "или числовой account_id / SteamID64."
+        "Не понял. Нужна ссылка Dotabuff/OpenDota (.../players/<id>), account_id или SteamID64."
     )
 
 
@@ -81,9 +80,9 @@ def resolve_account_id(text: str, session=None, timeout: int = 15) -> int:
             match = _STEAMID64_RE.search(resp.text)
             break  # профиль не найден — это ответ Steam, повторять незачем
     else:
-        raise ValueError("Не смог обратиться к Steam, чтобы определить ID. Дай ссылку Dotabuff/OpenDota или число.")
+        raise ValueError("Steam не ответил. Пришлите ссылку Dotabuff/OpenDota или числовой ID.")
     if not match:
         raise ValueError(
-            f"Не нашёл Steam-профиль «{vanity}» (или он скрыт). Дай ссылку Dotabuff/OpenDota или числовой ID."
+            f"Не нашёл Steam-профиль «{vanity}» (или он скрыт). Пришлите ссылку Dotabuff/OpenDota или числовой ID."
         )
     return _to_account_id(int(match.group(1)))

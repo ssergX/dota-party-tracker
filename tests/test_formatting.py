@@ -86,7 +86,7 @@ def test_plural_games():
 
 def test_zero_games_collapsed_no_noise():
     text = render_leaderboard([summary(games_total=0, wins_total=0, losses_total=0, winrate=0.0, kda_ratio=0.0)])
-    assert "игры отсутствуют" in text
+    assert "Игр пока нет" in text
     assert "KDA 0.00" not in text
     assert "0–0" not in text
 
@@ -146,19 +146,14 @@ def test_leaderboard_shows_perf_in_line():
 
 # --- awards -------------------------------------------------------------
 
-def test_render_awards_lists_leaders():
-    players = [
-        summary(display_name="A", winrate=0.8, wins_total=8, losses_total=2, games_total=10, streak_type="W", streak_len=3),
-        summary(display_name="B", winrate=0.3, wins_total=3, losses_total=7, games_total=10, streak_type="L", streak_len=4),
-    ]
-    text = render_awards(players)
-    assert "A" in text  # король винрейта / на кураже
-    assert "B" in text  # главный тилт (серия поражений)
+def test_render_awards_lists_leaders_with_period_label():
+    awards = [{"key": "winrate", "emoji": "👑", "title": "Наивысший винрейт", "player": "A", "detail": "80%"}]
+    text = render_awards(awards, "за сутки")
+    assert "Награды за сутки" in text and "A" in text and "80%" in text
 
 
-def test_render_awards_empty_when_no_eligible():
-    text = render_awards([summary(games_total=0, wins_total=0, losses_total=0)])
-    assert text == ""
+def test_render_awards_empty_when_no_awards():
+    assert render_awards([]) == ""
 
 
 # --- together -----------------------------------------------------------
@@ -218,7 +213,7 @@ def test_render_player_card_windowed_records():
         longest_win_streak=3,
     )
     text = render_player_card(s)
-    assert "В" in text                        # форма
+    assert "🟢🔴🟢" in text                    # форма
     assert "10/1/10" in text                    # лучшая игра
     assert "3" in text                          # макс серия
 
@@ -267,8 +262,8 @@ def test_render_player_card_with_standing_block():
 # --- сравнение в чате ---------------------------------------------------
 
 def _two_player_comparison():
-    a = summary(display_name="A", avg_perf=0.8, winrate=0.6, kda_ratio=4.0, avg_gpm_window=500.0)
-    b = summary(display_name="B", avg_perf=0.4, winrate=0.4, kda_ratio=2.0, avg_gpm_window=400.0)
+    a = summary(display_name="A", avg_perf=0.8, winrate=0.6, kda_ratio=4.0, avg_gpm_window=500.0, enriched_games=9, detail_games=9)
+    b = summary(display_name="B", avg_perf=0.4, winrate=0.4, kda_ratio=2.0, avg_gpm_window=400.0, enriched_games=9, detail_games=9)
     return build_chat_comparison([a, b]), [a, b]
 
 
@@ -374,7 +369,7 @@ def test_render_period_leaderboard():
     assert "Аня" in text and "4–1" in text and "80%" in text
     assert "📈" in text and "📉" in text
     assert "игр не было" in text  # Ваня
-    assert render_period_leaderboard([], "week").startswith("В данном чате нет")
+    assert render_period_leaderboard([], "week").startswith("Пока пусто")
 
 
 def test_find_hero_alias_ls_is_lifestealer():
@@ -399,7 +394,7 @@ def test_player_heroes_block_layout_with_emoji():
     rows = [{"hero_id": 1, "games": 987, "winrate": 0.53, "kda": 4.4, "avg_imp": -1, "avg_gpm": 624}]
     text = render_player_heroes("Shinoame", "all", rows)
     assert text.startswith("🦸 <b>Герои: Shinoame</b>")
-    assert "🥇" in text and "987и" in text
+    assert "🥇" in text and "987 игр" in text
     assert "🟡 53%" in text and "⚔️ KDA 4.4" in text and "📊 IMP -1" in text and "💰 GPM 624" in text
 
 
@@ -423,9 +418,69 @@ def test_player_roster_shows_current_mmr_and_extra_info():
 def test_player_roster_without_mmr_or_games():
     from mmrbot.formatting import render_player_list
     text = render_player_list([summary(current_mmr=None, anchor_mmr=None, games_total=0, mmr_delta=0)])
-    assert "MMR не указан" in text and "игр пока нет" in text
+    assert "MMR не указан" in text and "Игр пока нет" in text
 
 
 def test_player_roster_empty_gives_hint():
     from mmrbot.formatting import render_player_list
     assert "/add" in render_player_list([])
+
+
+def test_find_hero_no_random_substring_and_russian_names():
+    from mmrbot.heroes import find_hero, hero_name
+    assert find_hero("od") is None                       # «od» сидит внутри Bloodseeker — это не поиск
+    assert hero_name(find_hero("пудж")) == "Pudge"
+    assert hero_name(find_hero("Джаггернаут")) == "Juggernaut"
+    assert hero_name(find_hero("вк")) == "Wraith King"
+    assert hero_name(find_hero("wind")) == "Windranger"
+    assert hero_name(find_hero("seeker")) == "Bloodseeker"  # от 4 символов подстрока работает
+
+
+def test_update_heroes_adds_new_hero_and_renames():
+    from mmrbot import heroes
+    try:
+        added = heroes.update_heroes([{"id": 9999, "localized_name": "Новый Герой"}, {"id": "x"}, {"id": 2, "localized_name": "Axe"}])
+        assert added == 1 and heroes.hero_name(9999) == "Новый Герой"
+        assert heroes.hero_name(2) == "Axe"
+        assert heroes.update_heroes(None) == 0
+    finally:
+        heroes.HERO_NAMES.pop(9999, None)
+
+
+def test_card_labels_do_not_overclaim():
+    text = render_player_card(summary(
+        games_total=40, enriched_games=6, detail_games=9, avg_perf=0.6, avg_gpm_window=500.0,
+    ))
+    assert "Вся ранкед-история" in text and "Период анализа" not in text
+    assert "по 9 из 40" in text                  # экономика усреднена не по всем играм
+    assert "по 6 из 40" in text                  # и перф тоже
+
+
+def test_steam_profile_does_not_claim_last_dota_login():
+    from mmrbot.formatting import render_steam_profile
+    import inspect
+    sig = inspect.signature(render_steam_profile)
+    kwargs = {n: None for n in sig.parameters}
+    profile = {"personaname": "x", "last_login": "2015-01-01T00:00:00.000Z"}
+    # аргументы у функции свои — подставим по именам
+    kwargs.update({"profile": profile, "account_id": 1, "rank": "Divine 1"})
+    text = render_steam_profile(**{k: v for k, v in kwargs.items() if k in sig.parameters})
+    assert "Последний вход" not in text and "2015" not in text
+
+
+def test_card_shows_unknown_party_and_mmr_drift_hint():
+    text = render_player_card(summary(party_unknown=(3, 1), mmr_drift=True))
+    assert "размер пати неизвестен" in text and "3 игры" in text
+    assert "/setmmr" in text
+
+
+def test_skill_block_damage_group_uses_tower_damage_benchmark():
+    from mmrbot.formatting import _skill_block
+    text = _skill_block({"hero_damage_per_min": 0.5, "tower_damage": 0.9})
+    assert "Урон" in text and "70%" in text      # среднее героев и строений, а не только героев
+
+
+def test_leaderboard_explains_mmr_period_when_it_differs():
+    from mmrbot.formatting import render_leaderboard
+    assert "за 3 игры с момента задания MMR" in render_leaderboard([summary(games_total=10, anchor_games=3)])
+    assert "с момента задания MMR" not in render_leaderboard([summary(games_total=4, anchor_games=4)])

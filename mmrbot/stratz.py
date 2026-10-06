@@ -1,6 +1,6 @@
 """Клиент Stratz GraphQL API: позиция/роль/лейн/IMP и пер-матч статистика.
 
-Синхронный (requests), как opendota.py: троттлинг, ретраи, lock. Лимиты free-ключа
+Синхронный (requests), как opendota.py: троттлинг (слоты), ретраи; запросы потоков перекрываются. Лимиты free-ключа
 (8/сек, 150/мин, 1500/час) велики для бота пати, но запросы всё равно батчим —
 один запрос на игрока забирает пачку матчей сразу.
 """
@@ -18,7 +18,7 @@ _RETRY_STATUSES = {429, 500, 502, 503, 504}
 _PLAYER_FIELDS = """
     lobbyType
     players {
-      steamAccountId isRadiant partyId
+      steamAccountId isRadiant partyId heroId
       position role lane imp
       goldPerMinute experiencePerMinute networth heroDamage towerDamage heroHealing
       numLastHits numDenies level
@@ -69,7 +69,7 @@ class Stratz:
         self,
         api_key: str,
         min_interval: float = 0.2,
-        timeout: int = 30,
+        timeout=(5, 25),
         max_retries: int = 3,
         retry_sleep: float = 1.5,
         chunk: int = 10,
@@ -86,12 +86,16 @@ class Stratz:
         self._lock = threading.Lock()
 
     def _throttle(self) -> None:
+        """Резервируем слот под локом, спим вне лока (как в opendota.py): запросы идут параллельно."""
         if self.min_interval <= 0:
             return
-        wait = self.min_interval - (time.monotonic() - self._last_call)
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._last_call + self.min_interval)
+            self._last_call = slot
+        wait = slot - now
         if wait > 0:
             time.sleep(wait)
-        self._last_call = time.monotonic()
 
     def _query(self, query: str, variables: dict) -> dict:
         headers = {
@@ -99,36 +103,40 @@ class Stratz:
             "User-Agent": "STRATZ_API",  # без него Stratz отвечает 403
             "Content-Type": "application/json",
         }
-        with self._lock:
-            last_exc: Optional[Exception] = None
-            for attempt in range(self.max_retries):
-                self._throttle()
-                try:
-                    resp = self._session.post(
-                        URL, json={"query": query, "variables": variables},
-                        headers=headers, timeout=self.timeout,
-                    )
-                except requests.RequestException as exc:
-                    last_exc = exc
-                    time.sleep(self.retry_sleep * (attempt + 1))
-                    continue
-                if resp.status_code in _RETRY_STATUSES:
-                    last_exc = RuntimeError(f"Stratz HTTP {resp.status_code}")
-                    time.sleep(self.retry_sleep * (attempt + 1))
-                    continue
-                resp.raise_for_status()
-                payload = resp.json()
-                if payload.get("errors"):
-                    raise RuntimeError(f"Stratz: {payload['errors'][0].get('message')}")
-                return payload.get("data") or {}
-            raise last_exc or RuntimeError("Stratz: не удалось получить ответ")
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_retries):
+            self._throttle()
+            try:
+                resp = self._session.post(
+                    URL, json={"query": query, "variables": variables},
+                    headers=headers, timeout=self.timeout,
+                )
+                if resp.status_code not in _RETRY_STATUSES:
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    if payload.get("errors"):
+                        raise RuntimeError(f"Stratz: {payload['errors'][0].get('message')}")
+                    return payload.get("data") or {}
+                last_exc = RuntimeError(f"Stratz HTTP {resp.status_code}")
+            except requests.HTTPError:
+                raise  # 4xx — не ретраим
+            except (requests.RequestException, ValueError) as exc:  # сеть / битый JSON
+                last_exc = exc
+            if attempt < self.max_retries - 1:  # после последней попытки не спим зря
+                time.sleep(self.retry_sleep * (attempt + 1))
+        raise last_exc or RuntimeError("Stratz: не удалось получить ответ")
 
-    def get_matches(self, account_id: int, match_ids: list[int]) -> dict[int, dict]:
+    def get_matches(
+        self, account_id: int, match_ids: list[int], hints: Optional[dict] = None
+    ) -> dict[int, dict]:
         """Данные игрока по конкретным матчам → {match_id: поля}.
 
         История игрока у Stratz отстаёт (и lobbyType там ненадёжен), а запрос по match(id)
         отдаёт свежие матчи — поэтому берём по id, пачками через алиасы GraphQL (один запрос
         на chunk матчей). Матчей, которых у Stratz ещё нет, в результате не будет.
+
+        hints — {match_id: (is_radiant, hero_id)} из сохранённых матчей: у скрытого профиля steamAccountId
+        в ответе обнулён, и тогда игрока находим по стороне и герою (если такая строка ровно одна).
         """
         result: dict[int, dict] = {}
         for i in range(0, len(match_ids), self.chunk):
@@ -140,6 +148,10 @@ class Stratz:
                 if not rows:
                     continue
                 row = next((r for r in rows if r.get("steamAccountId") == account_id), None)
+                if row is None and hints and mid in hints:
+                    is_radiant, hero_id = hints[mid]
+                    same = [r for r in rows if r.get("isRadiant") == is_radiant and r.get("heroId") == hero_id]
+                    row = same[0] if len(same) == 1 else None
                 if row is None and not any("steamAccountId" in r for r in rows):
                     row = rows[0]  # ответ без id игроков — единственная строка
                 if row is None:

@@ -21,17 +21,21 @@ from mmrbot.backup import backup_db
 from mmrbot.formatting import (
     render_achievement_alert,
     render_game_alert,
+    render_start_alert,
     render_steam_change,
     render_weekly,
 )
 from mmrbot.service import _chat_lock, render_board, split_message
 from mmrbot.storage import Chat, Storage
+from mmrbot.tags import sync_member_tags
 from mmrbot.tracker import (
     backfill_opendota,
     backfill_stratz,
     build_weekly_report,
     detect_new_games,
+    detect_presence,
     detect_steam_changes,
+    refresh_heroes,
 )
 
 log = logging.getLogger(__name__)
@@ -77,7 +81,7 @@ async def send_digest(bot: Bot, storage: Storage, od: OpenDota, chat: Chat, due_
     сделанными: иначе каждый час повторялось бы полное обновление игроков впустую.
     """
     try:
-        text = await render_board(storage, od, chat.chat_id, today_only=False, refresh=True, stratz=stratz)
+        text = await render_board(storage, od, chat.chat_id, today_only=False, refresh=True, stratz=stratz, awards_period="day")
         for chunk in split_message("📰 <b>Ежедневная сводка</b>\n\n" + text):
             await bot.send_message(chat.chat_id, chunk, parse_mode="HTML")
         storage.set_last_digest_date(chat.chat_id, due_date)
@@ -95,7 +99,7 @@ async def send_digest(bot: Bot, storage: Storage, od: OpenDota, chat: Chat, due_
 
 
 def setup_scheduler(
-    bot: Bot, storage: Storage, od: OpenDota, stratz=None, backup_keep: int = 7
+    bot: Bot, storage: Storage, od: OpenDota, stratz=None, backup_keep: int = 7, steam=None
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
 
@@ -123,6 +127,15 @@ def setup_scheduler(
         except Exception:
             log.exception("Фоновое обогащение матчей OpenDota не удалось")
 
+    async def heroes_refresh() -> None:
+        """Справочник героев: раз в сутки и вскоре после старта."""
+        try:
+            added = await asyncio.to_thread(refresh_heroes, od)
+            if added:
+                log.info("Справочник героев пополнен: +%d", added)
+        except Exception:
+            log.exception("Обновление справочника героев не удалось")
+
     async def steam_watch() -> None:
         """Оповещения о смене ника/аватарки Steam (профили берём из OpenDota)."""
         try:
@@ -140,6 +153,22 @@ def setup_scheduler(
                     await bot.send_message(event["chat_id"], text, parse_mode="HTML")
             except Exception:
                 log.warning("Не удалось отправить оповещение Steam в чат %s", event["chat_id"], exc_info=True)
+
+    async def tags_sync() -> None:
+        """Теги участников с их MMR (чаты с /tags on); MMR берётся из кэша БД."""
+        now = int(datetime.now(timezone.utc).timestamp())
+        for chat in storage.list_chats():
+            if not chat.tag_mmr:
+                continue
+            try:
+                await sync_member_tags(bot, storage, chat.chat_id, now)
+            except Exception:
+                log.exception("Обновление тегов в чате %s не удалось", chat.chat_id)
+
+    scheduler.add_job(tags_sync, "interval", minutes=30, misfire_grace_time=300, max_instances=1,
+                      next_run_time=datetime.now(timezone.utc) + timedelta(seconds=120))
+    scheduler.add_job(heroes_refresh, "cron", hour=5, minute=10, misfire_grace_time=3600)
+    scheduler.add_job(heroes_refresh, "date", run_date=datetime.now(timezone.utc) + timedelta(seconds=45))
 
     # Каждые 30 минут сверяем ник/аватарку; первый прогон через минуту после старта (заполняет базу).
     scheduler.add_job(
@@ -166,6 +195,19 @@ def setup_scheduler(
                 except Exception:
                     log.warning("Не удалось отправить оповещение в чат %s", chat.chat_id, exc_info=True)
 
+    async def presence_watch() -> None:
+        """Оповещения «зашёл в Dota 2» (Steam Web API); без ключа задача не регистрируется."""
+        try:
+            events = await asyncio.to_thread(detect_presence, storage, steam, int(datetime.now(timezone.utc).timestamp()))
+        except Exception as exc:  # текст ошибки Steam-клиента ключа не содержит
+            log.warning("Проверка статуса Steam не удалась: %s", exc)
+            return
+        for event in events:
+            try:
+                await bot.send_message(event["chat_id"], render_start_alert(event), parse_mode="HTML")
+            except Exception:
+                log.warning("Не удалось отправить оповещение о заходе в Dota в чат %s", event["chat_id"], exc_info=True)
+
     async def weekly_summary() -> None:
         now_utc = datetime.now(timezone.utc)
         for chat in storage.list_chats():
@@ -189,9 +231,13 @@ def setup_scheduler(
         except Exception:
             log.exception("Бэкап БД не удался")
 
-    # Новые игры: каждые 4 минуты (OpenDota-кулдаун внутри не даёт дёргать API чаще раза в 2 минуты на игрока).
+    # Новые игры: каждые 4 минуты (OpenDota-кулдаун внутри не даёт дёргать API чаще раза в 2 минуты на игрока;
+    # без ключа и пока пати не играет — не чаще раза в 10 минут, см. tracker.GAME_IDLE_COOLDOWN).
     scheduler.add_job(game_watch, "interval", minutes=4, misfire_grace_time=120, max_instances=1,
                       next_run_time=datetime.now(timezone.utc) + timedelta(seconds=90))
+    if steam is not None:
+        scheduler.add_job(presence_watch, "interval", minutes=2, misfire_grace_time=120, max_instances=1,
+                          next_run_time=datetime.now(timezone.utc) + timedelta(seconds=75))
     scheduler.add_job(weekly_summary, "cron", minute=5, misfire_grace_time=300)
     # Бэкап БД: раз в сутки ночью + один раз вскоре после старта (если за сегодня копии ещё нет).
     scheduler.add_job(daily_backup, "cron", hour=4, minute=30, misfire_grace_time=3600)

@@ -97,3 +97,54 @@ def evaluate(matches: list[dict]) -> dict[str, Optional[str]]:
         if (m.get("duration") or 0) >= 3600 and "marathon" not in earned:
             earned["marathon"] = f"{hero} · {(m['duration']) // 60} мин"
     return earned
+
+
+def _when(match: dict) -> int:
+    """Момент, когда игра закончилась (для даты достижения); без длительности — начало."""
+    return match["start_time"] + (match.get("duration") or 0)
+
+
+def evaluate_timed(matches: list[dict]) -> dict[str, tuple[int, Optional[str]]]:
+    """code → (когда заработано, деталь): дата — реальный матч, на котором порог был достигнут.
+
+    Раньше датой считался день, когда бот заметил достижение: у всей старой истории стояла дата
+    добавления игрока в чат.
+    """
+    ordered = sorted(matches, key=lambda m: m["start_time"])
+    details = evaluate(ordered)
+    times: dict[str, int] = {}
+
+    for prefix, want_win in (("win_streak_", True), ("lose_streak_", False)):
+        current = 0
+        for m in ordered:
+            current = current + 1 if is_win(m["player_slot"], m["radiant_win"]) == want_win else 0
+            for need in _STREAKS[prefix]:
+                if current >= need:
+                    times.setdefault(f"{prefix}{need}", _when(m))
+
+    for need in _GAMES:
+        if len(ordered) >= need:
+            times[f"games_{need}"] = _when(ordered[need - 1])
+
+    by_hero: dict[int, list[dict]] = {}
+    for m in ordered:
+        if m.get("hero_id") is not None:
+            by_hero.setdefault(m["hero_id"], []).append(m)
+    if by_hero:
+        hero_matches = max(by_hero.values(), key=len)
+        for need in _HERO_GAMES:
+            if len(hero_matches) >= need:
+                times[f"hero_{need}"] = _when(hero_matches[need - 1])
+
+    single = {
+        "kills_20": lambda m: (m.get("kills") or 0) >= 20,
+        "deathless": lambda m: (m.get("deaths") or 0) == 0 and (m.get("kills") or 0) + (m.get("assists") or 0) >= 10,
+        "deaths_20": lambda m: (m.get("deaths") or 0) >= 20,
+        "marathon": lambda m: (m.get("duration") or 0) >= 3600,
+    }
+    for code, test in single.items():
+        hit = next((m for m in ordered if test(m)), None)
+        if hit is not None:
+            times[code] = _when(hit)
+
+    return {code: (times.get(code, ordered[-1]["start_time"] if ordered else 0), detail) for code, detail in details.items()}

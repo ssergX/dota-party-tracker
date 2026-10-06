@@ -1,6 +1,6 @@
 import pytest
 
-from mmrbot.commands import parse_add_args, parse_hour, parse_name_and_mmr, parse_step
+from mmrbot.commands import parse_add_args, parse_hour, parse_mmr_value, parse_name_and_mmr, parse_step
 
 
 # --- /add ---------------------------------------------------------------
@@ -141,3 +141,11 @@ def test_parse_match_args():
     assert parse_match_args("@vasya") == (None, "vasya")
     assert parse_match_args("8138048280 @vasya") == (8138048280, "vasya")
     assert parse_match_args("Вася последний") == (None, "Вася")
+
+
+def test_parse_mmr_value():
+    assert parse_mmr_value(" 5400 ") == 5400
+    with pytest.raises(ValueError):
+        parse_mmr_value("много")
+    with pytest.raises(ValueError):
+        parse_mmr_value("99999")

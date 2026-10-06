@@ -106,4 +106,4 @@ def test_cmd_steam_without_avatar_falls_back_to_text(storage):
 def test_cmd_steam_unknown_player(storage):
     msg = Msg()
     asyncio.run(botmod.cmd_steam(msg, CommandObject(command="steam", args="Никто"), storage, FakeOD()))
-    assert any("не найден" in t for t in msg.texts)
+    assert any("Не нашёл" in t for t in msg.texts)
